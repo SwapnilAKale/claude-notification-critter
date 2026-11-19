@@ -210,6 +210,16 @@ class Watching(unittest.TestCase):
         t.poll(now + 2 * U.SCAN_EVERY + 2)
         self.assertEqual(t.working(now), set())                     # you stopped it
 
+    def test_when_replies_ended(self):
+        now = time.time()
+        stop = lambda at: json.dumps({"type": "system", "subtype": "stop_hook_summary", "isSidechain": False,  # noqa: E731
+                                      "timestamp": iso(at)})
+        self.write("proj-a/one.jsonl", reply(now - 900, 1000, "1h"), stop(now - 890), reply(now - 300, 1200, "1h"),
+                   stop(now - 290))
+        t = U.TranscriptUsage(self.root)
+        t.poll(now)
+        self.assertEqual([round(now - at) for at in t.turn_ends_after(now - 600)], [290])
+
     def test_a_request_refused_at_the_limit(self):
         # Seen 2026-11-03: Claude records the refused request as an assistant message with zero usage. It isn't a
         # request (no tokens sent, no cache kept), but it says the session stopped at the limit, and until when.

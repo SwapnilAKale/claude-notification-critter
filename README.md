@@ -64,8 +64,11 @@ When something it reads breaks, it says so: after 20 seconds of the same problem
 card (what stopped working, what still works; click it to copy the diagnostic log), the ⚠ mark, and a Windows
 notification from the critter itself, once per problem. It checks: the sidebar shown but no row readable (a changed
 layout; it then carries on from transcripts and notifications), the Claude | Code switch gone, a usage ring it can't
-read, the transcripts or Claude's session records unreadable, and usage not updating for 45 minutes while sessions
-work. Each break and recovery is also logged.
+read, the transcripts or Claude's session records unreadable, and your usage hook stopping (at least 2 replies
+finished, the first over 5 minutes ago, without the usage reading the hook writes with every reply). It only reports
+what it has evidence for: not using Claude for a while, a compaction or a refused request (neither is a reply) never
+counts. Each break and recovery is also logged. (Claude's own usage file stopped getting new samples on 2026-11-19, with
+Claude 5.11; that's noted in the log, not raised: Claude never promised that file.)
 
 ## Notification access
 

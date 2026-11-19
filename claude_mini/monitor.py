@@ -32,7 +32,8 @@ GRACE = 3.0              # on the chat tab, give the Code toggle's summary this 
 WARN_AFTER = 4.0         # a problem only becomes a visible warning if it lasts this long
 MOVED_ON_SLACK = 2.0     # a request this soon after a toast may be the one that asked
 HEALTH_AFTER = 20.0      # a source has to stay broken this long before the blob says so (Claude redraws, restarts)
-USAGE_STALE_S = 45 * 60  # no usage figure this long while sessions are working: something stopped updating it
+HOOK_MISSED = 2          # this many finished replies without a usage reading: the usage hook stopped
+HOOK_SLACK_S = 300       # ... the first of them at least this long ago (a reply's reading lands with it)
 
 
 def claude_in_view(hwnd):
@@ -702,12 +703,19 @@ class Monitor(threading.Thread):
         elif self.transcripts is not None and not self.transcripts.records_ok:
             health.append(("records", "Can't read Claude's session records. Rewound sessions may show twice and "
                                       "archived ones aren't left out; everything else still works."))
-        last_work = self.transcripts.last_activity() if self.transcripts is not None else None
-        if self.usage is not None and last_work is not None and now - self.usage.seen_at > USAGE_STALE_S and \
-                last_work - self.usage.seen_at > USAGE_STALE_S:
-            health.append(("usage", "Usage hasn't updated for %s while sessions kept working. The usage hook or "
-                                    "Claude's usage file may have changed." %
-                           model.duration_text(now - self.usage.seen_at)))
+        # The usage hook runs when a reply finishes and writes its reading with it. Replies that finished with no
+        # reading are proof it stopped; a quiet spell isn't (reported 2026-11-19: after a break, one compaction, which
+        # isn't a reply, was taken for "usage stopped updating").
+        missed = self.transcripts.turn_ends_after(hooked.seen_at + 60) \
+            if self.transcripts is not None and hooked is not None else []
+        if len(missed) >= HOOK_MISSED and now - missed[0] >= HOOK_SLACK_S:
+            health.append(("usage", "Your usage hook stopped: %d replies finished since %s without a usage "
+                                    "reading. Claude's ring still updates the figures when you open it." %
+                           (len(missed), time.strftime("%H:%M", time.localtime(hooked.seen_at)))))
+        if sample is not None and now - sample[0] > 6 * 3600 and not getattr(self, "_said_old_sample", False):
+            self._said_old_sample = True        # not a failure (Claude never promised that file): a note in the log
+            self.log("note: Claude's own usage samples stop at %s" % time.strftime("%d-%m %H:%M",
+                                                                                  time.localtime(sample[0])))
         snap.health = health
 
         if not fresh and not layout_broken and not self.expanded and now >= self.quiet_until:

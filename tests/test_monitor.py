@@ -92,6 +92,9 @@ class FakeTranscripts(object):
     def last_activity(self):
         return self.world.last_activity
 
+    def turn_ends_after(self, t):
+        return sorted(at for at in self.world.turn_ends if at > t)
+
     def poll(self, now=None):
         return self.world.hooked
 
@@ -132,6 +135,7 @@ class World(object):
         self.working = set()      # titles of sessions whose transcript shows a turn under way
         self.local = set()        # titles of the local sessions the transcripts speak for
         self.last_activity = None  # when any session last made a request
+        self.turn_ends = []       # when main-thread turns ended (Stop hooks ran)
         self.chat_rows = []       # (title, status) what the chat tab lists with a status: chats, project sessions
         self.chats = []           # (title, None) plain chats in the chat tab's Recents
         self.open = []
@@ -854,16 +858,32 @@ class LoudBreaks(MonitorScenarios.__base__):
         w.usage = "Usage: Context 40%"                 # the ring showing the context window: fine
         self.assertEqual(self.poll().health, [])
 
-    def test_usage_that_stops_updating_is_said(self):
+    def test_a_break_then_a_compaction_is_not_a_failure(self):
+        # Reported 2026-11-19: after an hour away, one compaction (a request, but not a reply: the usage hook doesn't
+        # run) raised "usage hasn't updated". Not using Claude is normal.
         w = self.world
         now = M.time.time()
-        w.hooked = model.Usage(40, "5-hour limit", now + 4 * 3600, now)
-        w.last_activity = now
-        self.assertEqual(self.poll().health, [])
-        w.last_activity = now + M.USAGE_STALE_S + 120   # sessions kept working, no new figure
-        self.poll(M.USAGE_STALE_S + 60)
+        w.hooked = model.Usage(30, "5-hour limit", now + 3 * 3600, now)
+        w.turn_ends = [now]                            # that reply's reading came with it
+        self.poll()
+        w.last_activity = now + 3700                   # the compaction, an hour later
+        self.poll(3700)
+        s = self.poll(M.HEALTH_AFTER + 1)
+        self.assertEqual(s.health, [])
+
+    def test_replies_without_a_usage_reading_mean_the_hook_stopped(self):
+        w = self.world
+        now = M.time.time()
+        w.hooked = model.Usage(30, "5-hour limit", now + 3 * 3600, now)
+        w.turn_ends = [now, now + 600]                 # one reply finished with no reading: could be a fluke
+        self.assertEqual(self.poll(1000).health, [])
+        self.assertEqual(self.poll(M.HEALTH_AFTER + 1).health, [])
+        w.turn_ends = [now, now + 600, now + 900]       # a second one: the hook stopped
+        self.poll()
         s = self.poll(M.HEALTH_AFTER + 1)
         self.assertEqual([k for k, _ in s.health], ["usage"])
+        w.hooked = model.Usage(31, "5-hour limit", now + 3 * 3600, now + 1100)    # it's back
+        self.assertEqual(self.poll().health, [])
 
 
 class Cards(MonitorScenarios.__base__):

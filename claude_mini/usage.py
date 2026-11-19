@@ -357,7 +357,7 @@ class TranscriptUsage(object):
             info = self.sessions.setdefault(path, {"title": None, "last_at": None, "ttl": None, "tokens": None,
                                                    "window": None, "hook_pct": None, "check": None, "mtime": None,
                                                    "model": None, "root": None, "compacted": False,
-                                                   "limit_stop": None, "turn_open": False})
+                                                   "limit_stop": None, "turn_open": False, "turn_ends": []})
             if info["root"] is None:
                 head_title, info["root"] = self._read_head(path)
                 if info["title"] is None and not act["title"]:
@@ -377,6 +377,7 @@ class TranscriptUsage(object):
             info["compacted"] = act["compacted"]
             info["limit_stop"] = act["limit_stop"]
             info["turn_open"] = act["turn_open"]
+            info["turn_ends"] = act["turn_ends"]
             if act["compacted"]:
                 info["tokens"], info["hook_pct"] = act["tokens"], None    # the size before compacting is gone
             if ctx is not None:
@@ -455,6 +456,10 @@ class TranscriptUsage(object):
                 out.add(info["title"])
         return out
 
+    def turn_ends_after(self, t):
+        """When main-thread turns ended (their Stop hooks ran) after `t`, oldest first, across sessions."""
+        return sorted(at for info in self.sessions.values() for at in info["turn_ends"] if at > t)
+
     def last_activity(self):
         """When any session last made a request (None if none read)."""
         return max((info["last_at"] for info in self.sessions.values() if info["last_at"]), default=None)
@@ -503,7 +508,7 @@ class TranscriptUsage(object):
         the cache timer agreed with the API's own cache reads (check). If the tail holds neither a request nor a
         compaction (a compaction is followed by large records: reloaded files, tool lists), it looks further back."""
         act = {"title": None, "last_at": None, "ttl": None, "tokens": None, "check": None, "model": None,
-               "compacted": False, "limit_stop": None, "turn_open": False}
+               "compacted": False, "limit_stop": None, "turn_open": False, "turn_ends": []}
         try:
             with open(path, "rb") as fh:
                 if size > tail:
@@ -536,6 +541,10 @@ class TranscriptUsage(object):
                         (o.get("type") == "user" and "[Request interrupted" in json.dumps(
                             (o.get("message") or {}).get("content")))):
                     act["turn_open"] = False        # the turn ended (or you stopped it)
+                    if o.get("subtype") == "stop_hook_summary":
+                        at = _epoch(o.get("timestamp"))
+                        if at is not None:
+                            act["turn_ends"].append(at)     # its Stop hooks ran, the usage hook among them
             if '"hook_success"' in line:
                 u = usage_from_record(line)
                 if u is not None:
