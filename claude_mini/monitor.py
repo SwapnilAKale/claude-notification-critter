@@ -32,6 +32,9 @@ GRACE = 3.0              # on the chat tab, give the Code toggle's summary this 
 WARN_AFTER = 4.0         # a problem only becomes a visible warning if it lasts this long
 MOVED_ON_SLACK = 2.0     # a request this soon after a toast may be the one that asked
 HEALTH_AFTER = 20.0      # a source has to stay broken this long before the blob says so (Claude redraws, restarts)
+HEALTH_RECOVER = 60.0    # ... and stay fine this long before it counts as working again (no flipping on/off)
+SAMPLE_FRESH_S = 1800    # Claude's own usage samples older than this aren't used (a day-old one isn't today's figure)
+OPEN_STALE_S = 10.0      # the list of sessions open in Claude's panes is forgotten after this long without a reading
 HOOK_MISSED = 2          # this many finished replies without a usage reading: the usage hook stopped
 HOOK_SLACK_S = 300       # ... the first of them at least this long ago (a reply's reading lands with it)
 
@@ -423,6 +426,10 @@ class Monitor(threading.Thread):
         self.warn_since = {}
         self.health_since = {}               # health key -> since when that source has been broken
         self.health_said = set()             # broken sources already logged
+        self.health_text = {}                # health key -> what was said about it last
+        self.health_gone = {}                # health key -> since when it hasn't shown (it may only be out of sight)
+        self.health_ok = set()               # health keys a reading has just shown working (rows read again...)
+        self.open_at = 0.0                   # when the list of open sessions was last read
         self.access_checked = 0.0
         self.access_ok = True
         self.last_key = None
@@ -497,14 +504,28 @@ class Monitor(threading.Thread):
                 del self.warn_since[w]
         snap.warnings = [w for w in snap.warnings if now - self.warn_since[w] >= WARN_AFTER]
         # A broken source is said loudly (a red card, and the app's own notification), but only once it has lasted.
+        # A problem that stops showing has often only gone out of sight (Claude behind another app, no Code session
+        # open): it counts as working again only on evidence (e.g. the sidebar's rows read again) or after it has
+        # stayed away HEALTH_RECOVER seconds, so one ongoing problem is never announced twice (reported 2026-11-25:
+        # "works again" / "broke" every few seconds while Claude came and went).
         keys = {k for k, _ in snap.health}
-        for k in keys:
-            if k not in self.health_since:
-                self.health_since[k] = now
+        for k, text in snap.health:
+            self.health_since.setdefault(k, now)
+            self.health_text[k] = text
+            self.health_gone.pop(k, None)
         for k in list(self.health_since):
-            if k not in keys:
+            if k in keys:
+                continue
+            gone = self.health_gone.setdefault(k, now)
+            if k in self.health_ok or k not in self.health_said or (k != "sidebar" and now - gone >= HEALTH_RECOVER):
                 del self.health_since[k]
-                self.log("health: %s works again" % k)
+                self.health_gone.pop(k, None)
+                if k in self.health_said:
+                    self.health_said.discard(k)
+                    self.log("health: %s works again" % k)
+            else:
+                snap.health.append((k, self.health_text[k]))      # still broken as far as we know
+                keys.add(k)
         snap.health = [(k, text) for k, text in snap.health if now - self.health_since[k] >= HEALTH_AFTER]
         for k, text in snap.health:
             if k not in self.health_said:
@@ -615,7 +636,7 @@ class Monitor(threading.Thread):
         except Exception:
             traceback.print_exc()
             sample = None
-        if sample is not None and sample[0] > max(self.sample_at, self.hook_at):
+        if sample is not None and sample[0] > max(self.sample_at, self.hook_at) and now - sample[0] <= SAMPLE_FRESH_S:
             self.sample_at = sample[0]
             self.last_reset.update(passed_resets(self.usage, sample[0]))
             self.usage = merge_sample(self.usage, sample[0], sample[1])
@@ -645,6 +666,9 @@ class Monitor(threading.Thread):
         # changed (an update). Not a hidden sidebar: say so loudly, and carry on from the transcripts.
         layout_broken = reading is not None and reading.complete and reading.sidebar_found and not chat_tab and \
             not reading.rows and bool(local)
+        self.health_ok = {"sidebar"} if fresh and not chat_tab else set()      # the sidebar's rows were just read
+        if reading is not None and reading.complete and reading.mode_found:
+            self.health_ok.add("mode")                                         # the Claude | Code switch is there
         if fresh:
             cloud = "; ".join("%s=%s/%s" % (r.title[:28], r.status, r.env_state) for r in reading.rows if r.env)
             if cloud != getattr(self, "_last_cloud", None):
@@ -658,10 +682,6 @@ class Monitor(threading.Thread):
             else:
                 self.code_rows = reading.rows
                 self.last_rows = with_transcript_turns(reading.rows, working, local, demote=False)
-            # On the chat tab only what it lists can be open in front of you: a Code session's pane isn't on screen
-            # there, so it counts like any other (reported 2026-11-04: on the chat tab the critter didn't react).
-            self.last_open = {t for t in reading.open_titles if t in {r.title for r in reading.rows}} if chat_tab \
-                else reading.open_titles
             self.unreadable_since = None
         else:
             if self.unreadable_since is None:
@@ -669,6 +689,16 @@ class Monitor(threading.Thread):
             # The sidebar can't be read (Claude closed to the tray, minimized, the sidebar hidden, a changed layout):
             # the last reading, kept current by the transcripts.
             self.last_rows = with_transcript_turns(self.last_rows, working, local, demote=True)
+        # Which sessions are open in Claude's panes comes from their headers, not the sidebar: taken from every complete
+        # reading, rows readable or not (reported 2026-11-25: with Claude 6's sidebar unreadable, the open list froze
+        # empty and a permission card for the session on screen kept saying it needed you). On the chat tab only what
+        # it lists can be open in front of you: a Code session's pane isn't on screen there (reported 2026-11-04).
+        if reading is not None and reading.complete:
+            listed = {_norm(r.title) for r in reading.rows}            # matched like titles elsewhere (case, spacing)
+            self.last_open = {t for t in reading.open_titles if _norm(t) in listed} if chat_tab else reading.open_titles
+            self.open_at = now
+        elif now - self.open_at > OPEN_STALE_S:
+            self.last_open = set()           # not read for a while: don't keep leaving sessions out on old news
         rows = self.last_rows
         snap.cloud = self._recent_cloud(cloud_list(rows), now)
         # Open sessions drop out only while you can actually see them (Claude is the window you're using, or most of
@@ -676,6 +706,7 @@ class Monitor(threading.Thread):
         # closed to the tray, they count like any other (e.g. an open session auto-continuing while you're in Chrome).
         in_view = state == "visible" and claude_in_view(hwnd)
         open_titles = self.last_open if in_view else set()
+        open_norm = {_norm(t) for t in open_titles}     # a pane header and a sidebar row may differ in case or spacing
         diag = "rows: %s | open: %s | in view: %s | fresh: %s" % (
             ", ".join("%s=%s%s" % (r.title[:28], r.status, "~" if hasattr(r, "cap") else "") for r in (rows or ())
                       if row_class(r) in (NEEDS, NEW, WORKING)) or "-",
@@ -716,6 +747,16 @@ class Monitor(threading.Thread):
             self._said_old_sample = True        # not a failure (Claude never promised that file): a note in the log
             self.log("note: Claude's own usage samples stop at %s" % time.strftime("%d-%m %H:%M",
                                                                                   time.localtime(sample[0])))
+        # What this reading shows working again (a problem stops being said on evidence, not just by going unseen).
+        if reading is not None and reading.usage and (ring is not None or reading.usage[len("Usage:"):].strip().lower()
+                                                      .startswith("context")):
+            self.health_ok.add("ring")
+        if not missed:
+            self.health_ok.add("usage")      # turn ends only accumulate: none missed means a newer reading came
+        if self.transcripts is not None and self.transcripts.ok:
+            self.health_ok.add("transcripts")
+        if self.transcripts is not None and self.transcripts.records_ok:
+            self.health_ok.add("records")
         snap.health = health
 
         if not fresh and not layout_broken and not self.expanded and now >= self.quiet_until:
@@ -774,7 +815,7 @@ class Monitor(threading.Thread):
                 continue
             # News for a session you have open in front of you: Claude never marks it unread (you're looking at it),
             # so there's no indicator to clear. Seeing it for a few seconds is reading it.
-            if it.kind == NEW and row.title in open_titles:
+            if it.kind == NEW and _norm(row.title) in open_norm:
                 if it.viewed_since is None:
                     it.viewed_since = now
                 if now - it.viewed_since >= GRACE:
@@ -809,7 +850,7 @@ class Monitor(threading.Thread):
                 snap.paused += 1
                 cards.append(model.Card(r.title, model.PAUSED, paused_detail(stop, resumes, now), r.title))
                 continue
-            if r.title in open_titles:
+            if _norm(r.title) in open_norm:
                 if cls == NEEDS or id(r) in toasted:
                     snap.open_needs.append(r.title)
                 continue                     # open in Claude right now: you're looking at it
@@ -868,6 +909,25 @@ class Monitor(threading.Thread):
                 if cur is None or (it.kind == NEEDS and cur.kind != NEEDS):
                     unmatched[key] = it
         for it in unmatched.values():
+            # Its session is open in front of you (no sidebar row to say so, e.g. while the rows can't be read):
+            # you're looking at it, as for a row.
+            seen = next((t for t in open_titles if toast_matches(it.toast.title, t)), None)
+            if seen is not None:
+                if it.kind == NEEDS:
+                    if _norm(seen) not in {_norm(t) for t in snap.open_needs}:     # once, however it's spelled
+                        snap.open_needs.append(seen)
+                    continue
+                # News for it: seeing it for a few seconds is reading it, as for a session with a row.
+                if it.viewed_since is None:
+                    it.viewed_since = now
+                if now - it.viewed_since >= GRACE:
+                    for nid, other in list(self.items.items()):
+                        if other.row_title is None and other.kind != NEEDS and _norm(other.toast.title) == \
+                                _norm(it.toast.title):
+                            self.consumed.add(nid)
+                            del self.items[nid]
+                continue
+            it.viewed_since = None
             kind, detail = card_content(it.toast.body, False)
             stop = next((s for t, s in limit_stops.items() if toast_matches(it.toast.title, t)), None)
             if (full or stop) and kind in (model.WAITING, model.PROBLEM):

@@ -122,6 +122,7 @@ class FakeHistory(object):
 class World(object):
     def __init__(self):
         self.running = True
+        self.hidden = False       # Claude's window closed to the tray (still running): nothing on screen to read
         self.sidebar_visible = True
         self.chat_tab = False
         self.aggregate = ""
@@ -163,7 +164,7 @@ class MonitorScenarios(unittest.TestCase):
                        M.TranscriptUsage, M.PlanHistory)
         M.TranscriptUsage = lambda: FakeTranscripts(w)
         M.PlanHistory = lambda: FakeHistory(w)
-        M.claude_window_state = lambda: (1234, "visible") if w.running else (0, "not running")
+        M.claude_window_state = lambda: (1234, "hidden" if w.hidden else "visible") if w.running else (0, "not running")
         M.claude_in_view = lambda hwnd: w.in_view
         M.UiaReader = lambda: FakeUia(w)
         M.NotificationReader = lambda: FakeToasts(w)
@@ -813,6 +814,12 @@ class MonitorScenarios(unittest.TestCase):
         self.assertEqual(s.needs_titles[0], "Newer")
 
 
+class _Broken(object):
+    def read(self, hwnd):
+        from claude_mini import com
+        raise com.ComError(-2147220991, "element not available")     # UIA_E_ELEMENTNOTAVAILABLE
+
+
 class LoudBreaks(MonitorScenarios.__base__):
     """Asked 2026-11-19: every Claude update broke the critter silently. It now carries on from Claude Code's own
     records and says loudly what stopped working."""
@@ -837,6 +844,111 @@ class LoudBreaks(MonitorScenarios.__base__):
         w.rows = [("BRIEF.md implementation end-to-end", "Running")]               # readable again
         s = self.poll()
         self.assertEqual((s.health, [c.kind for c in s.cards]), ([], []))
+
+    def test_a_session_on_screen_is_known_even_when_the_sidebar_cant_be_read(self):
+        # Reported 2026-11-25 (Claude 6.28899): the sidebar's rows couldn't be read, so the list of open sessions was
+        # never updated; a permission card for the session you were looking at kept saying it needed you.
+        w = self.world
+        w.local = {"Realtime voice agent integration"}
+        w.rows = []                                    # the sidebar's rows can't be read
+        w.open = ["Realtime voice agent integration"]  # its pane header is on screen
+        self.poll()
+        w.toast("SwapnilAKale/Confab · Realtime voice agent integration", "Allow Claude to run git status?")
+        s = self.poll()
+        self.assertEqual((s.needs_me, s.open_needs), (0, ["Realtime voice agent integration"]))
+        w.open = []                                    # you switch to another session: it needs you again
+        self.assertEqual(self.poll().needs_me, 1)
+
+    def test_a_row_from_the_transcripts_for_a_session_on_screen(self):
+        # The log's case: rows unreadable, the session working (its row comes from its transcript), its pane open.
+        w = self.world
+        w.local = {"Realtime voice agent integration"}
+        w.working = {"Realtime voice agent integration"}
+        w.rows = []
+        w.open = ["realtime voice agent  integration"]   # matched like titles elsewhere (case, spacing)
+        self.poll()
+        w.toast("SwapnilAKale/Confab · Realtime voice agent integration", "Allow Claude to run git status?")
+        s = self.poll()
+        self.assertEqual((s.needs_me, s.open_needs), (0, ["Realtime voice agent integration"]))
+
+    def test_on_the_chat_tab_a_listed_session_open_on_screen_is_matched_like_elsewhere(self):
+        # Found by the checker 2026-11-25: on the chat tab the open list was filtered by exact title, so a pane header
+        # differing from its row in case or spacing made an open session count as needing you.
+        w = self.world
+        w.rows = [("Realtime voice agent integration", "Running")]
+        self.poll()
+        w.sidebar_visible, w.chat_tab = False, True
+        w.chat_rows = [("Realtime voice agent integration", "Awaiting input")]
+        w.open = ["realtime voice agent  integration"]
+        w.toast("SwapnilAKale/Confab · Realtime voice agent integration", "Allow Claude to run git status?")
+        s = self.poll()
+        self.assertEqual((s.needs_me, s.open_needs), (0, ["Realtime voice agent integration"]))
+
+    def test_an_open_session_waiting_on_you_is_listed_once(self):
+        # Found by the checker 2026-11-25: a session already listed as open-and-waiting from its row could be listed
+        # again from a notification that wasn't tied to that row, spelled like its pane header.
+        w = self.world
+        w.rows = [("Realtime voice agent integration", "Awaiting input")]
+        w.open = ["realtime voice agent  integration"]
+        self.poll()
+        w.toast("SwapnilAKale/Confab · Realtime voice agent integration", "Allow Claude to run git status?")
+        saved = M.best_row
+        M.best_row = lambda rows, item: None           # the notification couldn't be tied to its row
+        try:
+            s = self.poll()
+        finally:
+            M.best_row = saved
+        self.assertEqual((s.needs_me, s.open_needs), (0, ["Realtime voice agent integration"]))
+
+    def test_news_seen_on_screen_is_read_without_a_sidebar_row(self):
+        w = self.world
+        w.rows = []
+        w.open = ["Phase 1 project build"]
+        self.poll()
+        w.toast("Finder · Phase 1 project build", "Build finished, all tests pass")
+        self.assertEqual(self.poll().new, 0)
+        self.poll(M.GRACE + 1)                         # on screen for a few seconds: read
+        w.open = []                                    # you move on
+        self.assertEqual(self.poll().new, 0)           # it doesn't come back
+
+    def test_the_open_list_is_forgotten_when_not_read(self):
+        w = self.world
+        w.rows = [("Perm", "Awaiting input")]
+        w.open = ["Perm"]
+        self.assertEqual(self.poll().needs_me, 0)
+        self.m.uia = None
+        M.UiaReader = lambda: _Broken()                # Claude's window can't be read any more
+        self.assertEqual(self.poll().needs_me, 0)      # a moment's blip: still taken as open
+        self.assertEqual(self.poll(M.OPEN_STALE_S + 1).needs_me, 1)
+
+    def test_one_break_is_announced_once_while_claude_comes_and_goes(self):
+        # Reported 2026-11-25: "sidebar works again" / "sidebar broke" every few seconds as Claude went behind other
+        # apps; each "break" could notify again.
+        w = self.world
+        logs = []
+        self.m.log = logs.append
+        w.local = {"A"}
+        w.rows = []
+        self.poll()
+        self.assertEqual([k for k, _ in self.poll(M.HEALTH_AFTER + 1).health], ["sidebar"])
+        for hidden, in_view in [(True, False), (False, False), (False, True), (True, False), (False, False)]:
+            w.hidden, w.in_view = hidden, in_view      # closed to the tray / behind another app / back, still broken
+            self.assertEqual([k for k, _ in self.poll(30).health], ["sidebar"])    # still broken, not "fixed"
+        w.hidden, w.in_view = False, True
+        w.rows = [("A", "Idle")]                       # rows read again: fixed
+        self.assertEqual(self.poll().health, [])
+        said = [x for x in logs if x.startswith("health: sidebar")]
+        self.assertEqual([x.split(":")[1].strip() for x in said], ["sidebar broke", "sidebar works again"])   # once each
+
+    def test_a_day_old_usage_sample_is_not_todays_figure(self):
+        # Reported 2026-11-25: at startup a sample from the day before showed 100% / 100% as current.
+        w = self.world
+        self.clock.t += 3 * 86400                      # the test clock starts near 0: make "a day ago" a real time
+        now = M.time.time()
+        w.sample = (now - 86400, {"5-hour": 100, "weekly": 100})
+        self.assertIsNone(self.poll().usage)
+        w.sample = (now - 60, {"5-hour": 3, "weekly": 40})
+        self.assertEqual(dict((l, p) for l, p, _ in self.poll().usage.rows())["5-hour limit"], 3)
 
     def test_work_counts_while_claude_is_closed_to_the_tray(self):
         w = self.world

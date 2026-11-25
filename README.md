@@ -67,7 +67,9 @@ layout; it then carries on from transcripts and notifications), the Claude | Cod
 read, the transcripts or Claude's session records unreadable, and your usage hook stopping (at least 2 replies
 finished, the first over 5 minutes ago, without the usage reading the hook writes with every reply). It only reports
 what it has evidence for: not using Claude for a while, a compaction or a refused request (neither is a reply) never
-counts. Each break and recovery is also logged. (Claude's own usage file stopped getting new samples on 2026-11-19, with
+counts. A problem is announced once: it counts as fixed only when a reading shows it working again (the sidebar's
+rows read, the ring readable, a new usage reading...), not just because it went out of sight while Claude was behind
+another app. Each break and recovery is also logged. (Claude's own usage file stopped getting new samples on 2026-11-19, with
 Claude 5.11; that's noted in the log, not raised: Claude never promised that file.)
 
 ## Notification access
@@ -306,6 +308,11 @@ Details: [RECON.md](RECON.md).
   your clicks on the blob/cards (bring Claude forward, select that session in the sidebar).
 
 ## Limitations
+
+- **Claude 6.28 (2026-11-25):** the sidebar rows became links instead of buttons; both are read. Which sessions are
+  open in Claude's panes comes from their headers ("<title>, rename session") on every reading, so it keeps working
+  even when the sidebar can't be read; it's forgotten after 10 seconds without a reading. Claude's own usage samples
+  older than 30 minutes are not used.
 
 - **Claude 5.11 (2026-11-19)** changed the sidebar: rows have no status element any more, just the title, then the
   status as plain text ("Running"), none when idle. Rows are recognised by their own "More options for <title>"

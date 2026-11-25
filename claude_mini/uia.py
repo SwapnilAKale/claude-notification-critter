@@ -12,7 +12,8 @@ Recon facts this relies on (see RECON.md):
 - a cloud session's row also carries a caption after its status: "Cloud", or "Cloud · <state>" (seen: "Cloud ·
   Merged", a pull-request state);
 - Claude 5.11 (2026-11): no status element any more. A row is a Button holding Texts (title, [subtitle], [status],
-  [caption]) next to its own "More options for <title>" button; an idle row has no status text at all.
+  [caption]) next to its own "More options for <title>" button; an idle row has no status text at all;
+- Claude 6.28 (2026-11-25): the same, but the row is a Hyperlink instead of a Button.
 """
 import ctypes
 import re
@@ -31,6 +32,8 @@ IID_LegacyPattern = GUID.parse("828055ad-355b-4435-86d5-3b51c14a9b1b")
 # property / control type / pattern ids
 P_NAME, P_CONTROLTYPE, P_ISOFFSCREEN, P_ARIAROLE = 30005, 30003, 30022, 30101
 CT_BUTTON, CT_IMAGE, CT_RADIO, CT_STATUSBAR, CT_TEXT, CT_GROUP = 50000, 50006, 50013, 50017, 50020, 50026
+CT_HYPERLINK = 50005
+ROW_TYPES = (CT_BUTTON, CT_HYPERLINK)          # a session row: a Button, or a Hyperlink since Claude 6 (2026-11-25)
 PAT_INVOKE, PAT_SELECTIONITEM, PAT_LEGACY = 10000, 10010, 10018
 SCOPE_CHILDREN, SCOPE_DESCENDANTS, SCOPE_SUBTREE = 2, 4, 7
 
@@ -275,7 +278,7 @@ class UiaReader(object):
             if k.get_int(E_CACHED_CONTROLTYPE) == CT_STATUSBAR:
                 beside = k.get_bstr(E_CACHED_NAME).strip() or beside
         for child in kids:
-            if child.get_int(E_CACHED_CONTROLTYPE) == CT_BUTTON:
+            if child.get_int(E_CACHED_CONTROLTYPE) in ROW_TYPES:
                 count[0] += 1
                 row = self._row(child)
                 if row is None and not beside:
@@ -329,7 +332,7 @@ class UiaReader(object):
                 if title and env is None:
                     env = parse_caption(text)
                 title = title or text
-            elif ct != CT_BUTTON and depth < 3:          # a nested Button ("Hide nested sessions ...") isn't the row
+            elif ct not in ROW_TYPES and depth < 3:      # a nested Button ("Hide nested sessions ...") isn't the row
                 stack.extend((k, depth + 1) for k in reversed(list(_array(el.get_ptr(E_GET_CACHED_CHILDREN)))))
         if status is None or not title:
             return None
@@ -364,7 +367,7 @@ class UiaReader(object):
                 t = el.get_bstr(E_CACHED_NAME).strip()
                 if t:
                     out.append(t)
-            elif ct != CT_BUTTON and depth < 4:
+            elif ct not in ROW_TYPES and depth < 4:
                 out.extend(self._texts(list(_array(el.get_ptr(E_GET_CACHED_CHILDREN))), depth + 1))
         return out
 
@@ -457,9 +460,9 @@ class UiaReader(object):
         if depth > 40:
             return None
         for child in _array(el.get_ptr(E_GET_CACHED_CHILDREN)):
-            if child.get_int(E_CACHED_CONTROLTYPE) == CT_BUTTON:
+            if child.get_int(E_CACHED_CONTROLTYPE) in ROW_TYPES:
                 kids = list(_array(child.get_ptr(E_GET_CACHED_CHILDREN)))
-                if not any(k.get_int(E_CACHED_CONTROLTYPE) == CT_BUTTON for k in kids):
+                if not any(k.get_int(E_CACHED_CONTROLTYPE) in ROW_TYPES for k in kids):
                     name = child.get_bstr(E_CACHED_NAME).strip()
                     if name and not name.startswith(("More options", "Toggle sessions")) and matches(name):
                         return child

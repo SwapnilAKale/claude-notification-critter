@@ -148,6 +148,31 @@ class SidebarLayouts(unittest.TestCase):
                                        ("Docker Compose deployment on Oracle Cloud", "Idle"),
                                        ("Final integration and deliverables", "Idle")], True))
 
+    def test_claude_6_rows_are_hyperlinks(self):
+        # Seen 2026-11-25 (Claude 6.28899): the same as 5.11, but the row is a Hyperlink instead of a Button.
+        def row(title, *texts):
+            return G(G(El(U.CT_HYPERLINK, "%s %s" % (title, " ".join(texts)), G(G(T(title), *[T(t) for t in texts]))),
+                       G(B("More options for " + title))))
+        tree = G(row("Realtime voice agent integration", "Running"),
+                 row("Make the blob critter bigger and 3D", "Started by Claude from Claude desktop companion blob app"))
+        self.assertEqual(rows(tree), ([("Realtime voice agent integration", "Running"),
+                                       ("Make the blob critter bigger and 3D", "Idle")], True))
+
+    def test_a_hyperlink_row_is_what_a_click_opens(self):
+        # Opening a session from the blob clicks the element paired with its row (or, on the chat tab, a plain entry
+        # named with the title): with Claude 6 that's the Hyperlink itself.
+        link = El(U.CT_HYPERLINK, "Realtime voice agent integration Running",
+                  G(G(T("Realtime voice agent integration"), T("Running"))))
+        tree = G(G(G(link, G(B("More options for Realtime voice agent integration")))))
+        reader = U.UiaReader.__new__(U.UiaReader)
+        pairs, count = [], [0]
+        reader._collect(tree, pairs, 0, count)
+        self.assertEqual([(r.title, b) for r, b in pairs], [("Realtime voice agent integration", link)])
+        chat = El(U.CT_HYPERLINK, "Greeting exchange", G(T("Greeting exchange")))
+        found = reader._plain_button(G(G(chat, G(B("More options for Greeting exchange")))),
+                                     lambda name: name == "Greeting exchange", 0)
+        self.assertIs(found, chat)
+
     def test_empty_status_icons_are_ignored(self):
         tree = G(G(B("Some header button"), S(""), G(B("More options"))))
         self.assertEqual(rows(tree), ([], True))
