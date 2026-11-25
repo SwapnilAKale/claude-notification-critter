@@ -1,7 +1,7 @@
 """Activity cards: a small panel under the blob with each session's latest news, in Claude's own words.
 
-Shown while the pointer is on the blob, the panel, or the gap between them. When Claude sends a new notification the
-panel also opens on its own for a few seconds, like a phone banner, and stays open for as long as you hover it.
+Shown only while the pointer is on the blob, the panel, or the gap between them: it never opens by itself (a new
+notification changes the critter's marks and pose instead).
 """
 import time
 import ctypes
@@ -26,7 +26,6 @@ CONTEXT_ROW = 21.0    # one session: its title, then how full its context is
 CLOUD_STATE = {"needs": "F59E0B", "new": "60A5FA", "working": "FFFFFF"}   # a cloud session's state, by its class
 
 TIMER_HIDE = 1
-PEEK_SECONDS = 6.0
 AMBER, BLUE, RED, GREY = "F59E0B", "60A5FA", "F87171", "A8A29E"
 
 
@@ -44,7 +43,6 @@ class CardPanel(Window):
                         win32.WS_EX_NOACTIVATE)
         self.on_open = on_open
         self.visible = False
-        self.peek_until = 0.0         # banner preview for a new notification
         self.snapshot = model.starting()
         self.blob = None
         self.scale = 1.0
@@ -55,11 +53,9 @@ class CardPanel(Window):
         self.arrow = win32.LoadCursorW(None, ctypes.c_void_p(win32.IDC_ARROW))
 
     # ---------- showing ----------
-    def show(self, blob, snapshot, peek=False):
+    def show(self, blob, snapshot):
         self.blob = blob
         self.snapshot = snapshot
-        if peek:
-            self.peek_until = time.time() + PEEK_SECONDS
         self._render(reposition=True)
         if not self.visible:
             win32.SetWindowPos(self.hwnd, win32.HWND_TOPMOST, 0, 0, 0, 0,
@@ -78,7 +74,6 @@ class CardPanel(Window):
             win32.ShowWindow(self.hwnd, win32.SW_HIDE)
             win32.KillTimer(self.hwnd, TIMER_HIDE)
             self.visible = False
-        self.peek_until = 0.0
         self.hover = None
 
     def bring_to_top(self):
@@ -350,9 +345,7 @@ class CardPanel(Window):
                 self.on_open(card)
             return 0
         if msg == win32.WM_TIMER and wparam == TIMER_HIDE:
-            # Close once the pointer is off the blob, the panel and the gap between them (and any banner time is up).
-            if time.time() < self.peek_until:
-                return 0
+            # Close once the pointer is off the blob, the panel and the gap between them.
             if not self.contains_cursor() and not (self.blob and self.blob.contains_cursor()):
                 self.hide()
             return 0

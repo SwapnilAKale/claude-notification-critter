@@ -103,18 +103,21 @@ The "blob" is Claude Code's pixel critter standing on your desktop (no backgroun
 | **Blue dot** | something new: a session finished (unread), or another Claude notification |
 | **Critter typing at its laptop** | something is working, nothing needs you |
 | **Critter breathing** | all quiet |
+| **Critter asleep, z's drifting up** | all quiet and every session's prompt cache has expired (the Context list is empty): your next message anywhere is read in full again. It stretches, dozes off, and wakes up (the same, backwards) as soon as anything happens |
 | **Faded critter + ⚠** | Claude's status can't be read right now (the panel says why) |
 | **No critter** | Claude isn't running |
 
 The whole area around the critter is clickable and hoverable, not just its pixels.
 
 Highest priority wins. A state clears when Claude's own indicator clears (you answer, open the session, ...), never
-on a timer.
+on a timer. Sleeping is the one exception, on purpose: it follows the prompt caches' lifetime (an hour, or five
+minutes, after each session's last request), since that's what it tells you about. It only sleeps when the transcripts
+could be read, so an empty Context list really means every cache has expired.
 
 - **Hover** the blob → the panel: one card per session, e.g. "Needs your permission: Allow Claude to run npm test?",
   "Has a question: …", "Plan ready for your review: …", "Finished: <summary>". The gap between blob and panel counts as
   part of the hover area.
-- **New notification** → the panel peeks open for a few seconds by itself (like a phone banner); hover to keep it.
+- **New notification** → the critter's marks and pose change; the panel never opens by itself (only when you hover).
 - **Click a card** → Claude opens normally, on that session.
 - **Click the blob** → Claude opens on the session that needs you. Clicking again steps through all of them in turn.
 - **Drag** the blob anywhere; it stays exactly where you drop it. Drag it *past* a screen edge and it half-tucks into
@@ -247,6 +250,7 @@ arms and four legs), with its own loop for every state:
 | working | something runs, nothing needs you | pulls a laptop out of its pocket, sets it down and opens it, sits behind it and types; now and then glances up at you, or looks up to think |
 | idle | all quiet | slow breathing, an occasional blink |
 | unreadable | status can't be read right now | scratches its head, looks around, "…" (plus the ⚠ mark) |
+| sleeping | all quiet and every prompt cache has expired (nothing on screen waiting or working either) | a big stretch with squinting eyes, its eyes grow heavy and it sinks down to doze; asleep it breathes slowly with closed eyes while z's drift up and fade |
 
 - `avatar_state(snapshot)` in `claude_mini/avatar.py` picks the state from the snapshot's level and its most urgent
   card. The critter is drawn in code (no image files) on a grid of whole pixels (3 px per unit at 125%, about 108 px
@@ -262,7 +266,9 @@ arms and four legs), with its own loop for every state:
 - Changes of state are smooth: the old animation settles back into a plain standing pose while its props fade out,
   then the new one rises out of it as its props fade in; the badge, the blue dot, the warning mark and the dimming
   fade too. Working plays its laptop intro on the way in and backwards on the way out (closes the lid, gets up,
-  pockets it). If a state comes back mid-change, the critter turns around from where it got to.
+  pockets it); sleeping does the same with its stretch and doze, so waking up is the doze played backwards. If a state
+  comes back mid-change, the critter turns around from where it got to. The sleeping z's are drawn without the drop
+  shadow, which would otherwise add a second stroke and turn them into X's on a light window.
 - Calm states redraw at 8-10 fps, the others at 15-25 fps (25 while changing state, 30 for the badge pulse); a
   frame costs about 1 ms (recent poses are kept ready to draw, so repeated ones, like idle or typing, cost less).
 - See every state as frame strips on a light and a dark desktop without running the app (writes
@@ -355,7 +361,7 @@ Details: [RECON.md](RECON.md).
 | `claude_mini/diag.py` | the in-memory diagnostic log |
 | `claude_mini/blob.py` | the blob window: drawing, drag, manual-only tuck |
 | `claude_mini/avatar.py` | the animated pixel critter inside the blob |
-| `claude_mini/cards.py` | the hover/peek card panel |
+| `claude_mini/cards.py` | the hover card panel |
 | `claude_mini/monitor.py` | background thread combining both sources into a snapshot; all status rules |
 | `claude_mini/usage.py` | plan usage from the get_usage Stop hook's records in Claude Code transcripts |
 | `claude_mini/uia.py` | UI Automation reader for Claude's sidebar (raw COM via ctypes) |

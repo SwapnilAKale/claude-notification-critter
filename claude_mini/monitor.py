@@ -620,9 +620,11 @@ class Monitor(threading.Thread):
             limit_stops = self.transcripts.limit_stops()
             working = self.transcripts.working(now)
             local = self.transcripts.local_titles()
+            transcripts_read = self.transcripts.ok
         except Exception:
             traceback.print_exc()
             hooked, activity, limit_stops, working, local = None, [], {}, set(), set()
+            transcripts_read = False
         if hooked is not None and (self.usage is None or hooked.seen_at > self.usage.seen_at):
             self.usage = hooked
             self.hook_at = hooked.seen_at
@@ -944,6 +946,14 @@ class Monitor(threading.Thread):
 
         cards.sort(key=lambda c: (not c.urgent, -c.when))
         snap.cards = cards
+        # Nothing needs you, works or is new, and every session's prompt cache is gone (the Context list is empty): your
+        # next message anywhere is read in full again. The critter dozes until something happens (asked 2026-11-25).
+        # Sessions open on screen aren't counted above, but one waiting on you, or working (its row, or its transcript
+        # with a turn under way), still keeps it awake. And an empty Context list is evidence only if the transcripts
+        # could be read.
+        open_working = any(row_class(r) == WORKING and _norm(r.title) in open_norm for r in rows or ())
+        snap.asleep = transcripts_read and not snap.contexts and not (
+            snap.needs_me or snap.finished or snap.new or snap.working or snap.open_needs or working or open_working)
         for u in sorted(unknown):
             snap.warnings.append("Unrecognised session status: %s" % u)
         return snap

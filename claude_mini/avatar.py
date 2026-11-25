@@ -25,21 +25,21 @@ from . import model
 
 PERMISSION, PLAN, QUESTION, PROBLEM, WAITING, FINISHED, UPDATE = (
     model.PERMISSION, model.PLAN, model.QUESTION, model.PROBLEM, model.WAITING, model.FINISHED, model.UPDATE)
-WORKING, IDLE, UNREADABLE = "working", "idle", "unreadable"
-STATES = (PERMISSION, QUESTION, PLAN, PROBLEM, WAITING, FINISHED, UPDATE, WORKING, IDLE, UNREADABLE)
+WORKING, IDLE, UNREADABLE, SLEEPING = "working", "idle", "unreadable", "sleeping"
+STATES = (PERMISSION, QUESTION, PLAN, PROBLEM, WAITING, FINISHED, UPDATE, WORKING, IDLE, UNREADABLE, SLEEPING)
 AWAY = "away"           # Claude isn't running: no animation, the critter walks off screen (see blob.py)
 
 W, H = 36, 24           # critter size (F)
 
 # loop length (s), and how often the blob needs a new frame: calm states are cheap
 LOOP = {PERMISSION: 2.2, QUESTION: 2.6, PLAN: 3.2, PROBLEM: 2.4, WAITING: 2.6, FINISHED: 1.8, UPDATE: 2.4,
-        WORKING: 6.0, IDLE: 4.0, UNREADABLE: 3.0}
-INTRO = {WORKING: 2.6}       # played once before the loop (and backwards when leaving)
+        WORKING: 6.0, IDLE: 4.0, UNREADABLE: 3.0, SLEEPING: 4.0}
+INTRO = {WORKING: 2.6, SLEEPING: 1.8}   # played once before the loop (and backwards when leaving: waking up)
 ENTER_S, EXIT_S = 0.4, 0.35  # other states ease in / out this fast
 OUTRO_SPEED = 1.6            # an intro played backwards runs this much faster
 TRANSITION_MS = 40
 FRAME_MS = {PERMISSION: 50, QUESTION: 50, PLAN: 66, PROBLEM: 50, WAITING: 50, FINISHED: 40, UPDATE: 50,
-            WORKING: 50, IDLE: 125, UNREADABLE: 100}
+            WORKING: 50, IDLE: 125, UNREADABLE: 100, SLEEPING: 100}
 
 COLORS = {"c": "D97757",    # body (terracotta)
           "d": "A8563B",    # body's side, when turned
@@ -49,9 +49,11 @@ COLORS = {"c": "D97757",    # body (terracotta)
           "i": "FFF6EC",    # the shine in an eye
           "k": "1C1B19",    # ink outlines of props
           "w": "FFFFFF", "p": "F5EBDD", "r": "DC2626", "y": "FBBF24", "g": "16A34A", "b": "7DD3FC",
-          "m": "D6D3CD", "n": "B07A4A", "z": "94A3B8", "j": "FBBF24", "o": "D97757", "l": "4B4F58", "s": "000000"}     # z: z's and dots, fine on light or dark
+          "m": "D6D3CD", "n": "B07A4A", "z": "94A3B8", "j": "FBBF24", "o": "D97757", "l": "4B4F58", "s": "000000",
+          "Z": "7C8799"}    # z: dots, fine on light or dark; Z: the sleeping z's, readable on both without a shadow
 CRITTER = "cdahei"      # keys drawn by critter(); everything else is a prop
-FLAT = "jz"             # glints and dots: no 3D depth
+FLAT = "jzZ"            # glints, dots and z's: no 3D depth
+NO_SHADOW = "Z"         # thin glyphs whose drop shadow would read as a second stroke (a z turned into an X)
 SHADOW = 0.35           # drop shadow opacity
 DEPTH, PROP_DEPTH = 4, 1    # how far the critter / its props reach back into the screen (F, up and to the right)
 TOP, SIDE = 0.24, -0.32     # the extrusion's top face is this much lighter, its right side this much darker
@@ -79,7 +81,9 @@ def avatar_state(snapshot):
         return next((k for k in kinds if k in (FINISHED, UPDATE)), FINISHED if snapshot.finished else UPDATE)
     if lvl == model.WORKING:
         return WORKING
-    return UNREADABLE if snapshot.degraded else IDLE
+    if snapshot.degraded:
+        return UNREADABLE
+    return SLEEPING if snapshot.asleep else IDLE
 
 
 # ---------- frame building ----------
@@ -383,6 +387,38 @@ def _idle(f, t):
     critter(f, squash=1 if t % 2.0 >= 1.0 else 0, eyes="blink" if 3.2 <= t < 3.45 else "open")
 
 
+ZED = ("ZZZZZ", "...Z.", "..Z..", ".Z...", "ZZZZZ")      # a z drifting up from the sleeping critter
+ZED_S = ("ZZZZ", "..Z.", ".Z..", "ZZZZ")                  # ... and a smaller one
+
+
+def _sleeping(f, t):
+    if t < INTRO[SLEEPING]:
+        _sleeping_intro(f, t)
+    else:
+        _sleeping_loop(f, t - INTRO[SLEEPING])
+
+
+def _sleeping_intro(f, t):
+    # a big stretch with a yawn, the eyes grow heavy, then it sinks down to doze (backwards: waking up)
+    if t < 0.6:
+        critter(f, arms=("up", "up"), eyes="squint", squash=-1 if t < 0.35 else 0)
+    elif t < 1.0:
+        critter(f, eyes="blink" if t < 0.8 else "closed", squash=1)
+    else:
+        p = min(1.0, (t - 1.0) / 0.6)
+        critter(f, dy=int(round(4 * p * p * (3 - 2 * p))), eyes="closed", arms=("down", "down"))
+
+
+def _sleeping_loop(f, t):
+    # asleep: lying low, slow breathing, z's drifting up and away
+    critter(f, dy=4, squash=1 if t % 4.0 >= 2.0 else 0, eyes="closed", arms=("down", "down"))
+    for phase, glyph in ((0.0, ZED), (0.5, ZED_S)):
+        s = (t / LOOP[SLEEPING] + phase) % 1.0
+        if s < 0.8:
+            a = 1.0 if s < 0.55 else (0.8 - s) / 0.25          # fades out near the top
+            f.art(-2 - int(round(6 * s)), 1 - int(round(16 * s)), glyph, a=a)
+
+
 def _unreadable(f, t):
     # puzzled: scratches its head, looks around, "..."
     arm = ("head" if int(t / 0.125) % 2 == 0 else "head2") if t < 1.5 else "out"
@@ -394,7 +430,7 @@ def _unreadable(f, t):
 
 _BUILD = {PERMISSION: _permission, QUESTION: _question, PLAN: _plan, PROBLEM: _problem, WAITING: _waiting,
           FINISHED: _finished, UPDATE: _update, WORKING: _working, IDLE: _idle,
-          UNREADABLE: _unreadable}
+          UNREADABLE: _unreadable, SLEEPING: _sleeping}
 
 
 def _clock(state, t):
@@ -599,7 +635,7 @@ def raster(items, shadow=False, depth=False):
         # everything fully opaque casts a shadow one cell down-right; one byte per cell as an int "lane"
         cast = bytearray(256)
         for i in range(1, len(pal)):
-            cast[i] = pal[i][1] >= 1.0
+            cast[i] = pal[i][1] >= 1.0 and pal[i][0] not in NO_SHADOW
         si = len(pal)
         pal.append(("s", SHADOW))
         above = 0

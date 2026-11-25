@@ -139,6 +139,7 @@ class Snapshot(object):
         self.contexts = []         # Context of the sessions that replied lately, newest first
         self.cloud = []            # (title, state shown, class: needs / new / working / idle) of cloud sessions
         self.health = []           # (key, what stopped working and what still works): a source of the reading broke
+        self.asleep = False        # nothing going on and every prompt cache gone: the critter dozes
 
     @property
     def level(self):
@@ -184,7 +185,7 @@ class Snapshot(object):
         return (self.level, self.needs_me, self.finished, self.new, self.working, self.paused, tuple(self.warnings),
                 tuple(self.needs_titles), self.claude_running, tuple(c.ident() for c in self.cards),
                 self.usage.ident() if self.usage else None, tuple((c.title, c.pct, c.cache_until and int(c.cache_until // 60), c.cache_ok, c.compacted) for c in self.contexts),
-                tuple(self.cloud), tuple(self.health))
+                tuple(self.cloud), tuple(self.health), self.asleep)
 
 
 def starting():

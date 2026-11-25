@@ -36,12 +36,12 @@ def next_session(candidates, visited):
     return candidates[0], [candidates[0]]                # went all the way round: start again
 
 
-DEMO_COUNT = 11
+DEMO_COUNT = 12
 
 
 def demo_state(i):
     """Made-up snapshots for --demo: one per avatar state (permission, question, plan, problem, waiting, finished,
-    update, working, idle, unreadable, offline)."""
+    update, working, idle, unreadable, offline, sleeping)."""
     s = model.Snapshot()
     C = model.Card
     if i == 0:
@@ -80,6 +80,8 @@ def demo_state(i):
         s.warnings.append("Claude's sidebar is hidden or the window is too narrow")
     elif i == 10:
         s.claude_running = False
+    elif i == 11:
+        s.asleep = True
     return s
 
 
@@ -96,13 +98,12 @@ class App(object):
         self.quitting = False
         self.demo_i = 0
         self.snapshot = model.starting()
-        self.seen_cards = None          # notification ids already previewed (None until the first reading)
+        self.seen_cards = None          # notification ids already logged as new cards (None until the first reading)
         self.click_round = []           # sessions blob clicks have opened this round
         # The watchdog restarted us: say why on the panel (clicking it copies the log).
         self.notice = model.Card("Claude mini", model.RESTARTED, "%s%s. Click to copy its log." % (
             restarted[:1].upper(), restarted[1:])) if restarted else None
         self.notice_until = time.time() + NOTICE_S
-        self.notice_peeked = False
         self.health_told = set()        # broken sources already announced (once each, until they work again)
         app = self
 
@@ -152,18 +153,15 @@ class App(object):
             self.tray.alert("Claude mini: Claude changed something", text)
         self.blob.apply(snap)
         self.tray.update(snap)
-        # A banner preview only for a genuinely new Claude notification, never for a card that comes back because
-        # you left a session that still needs you.
+        # Logged as a new card only for a genuinely new Claude notification, not for a card that comes back because you
+        # left a session that still needs you.
         toast_ids = set(c.toast_id for c in snap.cards if c.toast_id is not None)
         fresh = [] if self.seen_cards is None else [c for c in snap.cards
                                                     if c.toast_id is not None and c.toast_id not in self.seen_cards]
         self.seen_cards = (self.seen_cards or set()) | toast_ids
-        peek_notice = (self.notice is not None and not self.notice_peeked) or bool(broke)
-        if (fresh or peek_notice) and not self.blob.dragging and self.blob.here:
-            self.cards.show(self.blob, snap, peek=True)
-            self.notice_peeked = self.notice_peeked or peek_notice
-        else:
-            self.cards.update(snap)
+        # The panel opens only when you hover the critter (asked 2026-11-25: no panel popping up by itself when
+        # something happens); a broken source still sends its Windows notification.
+        self.cards.update(snap)
         names = {0: "DIMMED", 1: "NEUTRAL", 2: "WORKING", 3: "BLUE", 4: "AMBER"}
         self.log("%-7s %s" % (names[snap.level], snap.summary().replace("\n", " / ")))
         for c in fresh:

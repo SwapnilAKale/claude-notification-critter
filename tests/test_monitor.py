@@ -401,6 +401,78 @@ class MonitorScenarios(unittest.TestCase):
         self.assertEqual(s.cloud, [("Deploy to Oracle", "Awaiting input", M.NEEDS)])
         self.assertEqual(s.warnings, [])               # a caption state it doesn't know isn't taken for a problem
 
+    def test_the_critter_dozes_once_every_cache_is_gone(self):
+        # Asked 2026-11-25: when nothing is going on and every prompt cache has expired, the critter sleeps.
+        w = self.world
+        w.rows = [("Fix login", "Idle")]
+        w.contexts = [model.Context("Fix login", 20, 200000, 1000000, None, 0.0, M.time.time() + 600, None)]
+        self.assertFalse(self.poll().asleep)           # a cache is still warm
+        w.contexts = []
+        self.assertTrue(self.poll().asleep)            # all gone: asleep
+        w.rows = [("Fix login", "Running")]
+        self.assertFalse(self.poll().asleep)           # something works: awake
+        w.rows = [("Fix login", "Idle")]
+        w.toast("Claude-mini · Fix login", "Allow Claude to run npm test?")
+        self.assertFalse(self.poll().asleep)           # something needs you: awake
+
+    def test_finished_or_new_wakes_it(self):
+        w = self.world
+        w.rows = [("Fix login", "Idle")]
+        self.assertTrue(self.poll().asleep)
+        w.rows = [("Fix login", "Unread response")]   # a session finished
+        s = self.poll()
+        self.assertEqual((s.finished, s.asleep), (1, False))
+        w.rows = [("Fix login", "Idle")]
+        self.assertTrue(self.poll().asleep)
+        w.toast("Website redesign", "Claude posted an update")      # news (no sidebar row)
+        s = self.poll()
+        self.assertEqual((s.new, s.asleep), (1, False))
+
+    def test_a_session_open_on_screen_that_waits_or_works_keeps_it_awake(self):
+        # Found by the checker 2026-11-25: open sessions aren't counted, so one on screen waiting for your permission
+        # (or still working past its cache's lifetime) didn't keep the critter awake.
+        w = self.world
+        w.rows = [("Fix login", "Awaiting input")]
+        w.open = ["Fix login"]
+        s = self.poll()
+        self.assertEqual((s.needs_me, s.open_needs, s.asleep), (0, ["Fix login"], False))
+        w.rows = [("Fix login", "Running")]           # on screen, working
+        self.assertFalse(self.poll().asleep)
+        w.rows = [("Fix login", "Idle")]
+        w.working = {"Fix login"}                      # its transcript shows a turn under way
+        self.assertFalse(self.poll().asleep)
+        w.working = set()
+        self.assertTrue(self.poll().asleep)
+
+    def test_a_turn_under_way_keeps_it_awake_whatever_its_row_says(self):
+        # Found by the checker 2026-11-25: nothing guarded the transcripts' own "a turn is under way". An open session
+        # whose row says "Unread response" isn't counted (you're looking at it) and its row isn't rewritten to working;
+        # only its transcript says it has started again.
+        w = self.world
+        w.rows = [("Fix login", "Unread response")]
+        w.open = ["Fix login"]
+        self.assertTrue(self.poll().asleep)
+        w.working = {"Fix login"}
+        self.assertFalse(self.poll().asleep)
+
+    def test_no_sleep_when_reading_the_transcripts_fails(self):
+        w = self.world
+        w.rows = [("Fix login", "Idle")]
+        self.assertTrue(self.poll().asleep)
+
+        def broken(now=None):
+            raise OSError("the transcripts folder can't be read")
+        self.m.transcripts.poll = broken
+        self.assertFalse(self.poll().asleep)
+
+    def test_no_sleep_when_the_transcripts_cant_be_read(self):
+        # An empty Context list is evidence that every cache expired only if the transcripts were read.
+        w = self.world
+        w.rows = [("Fix login", "Idle")]
+        self.assertTrue(self.poll().asleep)
+        self.m.transcripts.ok = False
+        self.assertFalse(self.poll().asleep)
+
     def test_toast_dismissed_in_action_center(self):
         w = self.world
         self.poll()
