@@ -37,11 +37,15 @@ class FakeUia(object):
             r.rows = [Row(x[1], x[0], False, False, *(parse_caption(x[2]) if len(x) > 2 else (None, None)))
                       for x in self.world.rows]
         elif self.world.chat_tab:
-            r.mode_found = True
-            r.code_selected = False
-            r.aggregate = self.world.aggregate
+            r.mode_found = not self.world.no_mode
+            r.code_selected = False if r.mode_found else None
+            r.aggregate = self.world.aggregate if r.mode_found else ""
             r.sidebar_found = True
             r.rows = [Row(s, t, False, beside=True) for t, s in self.world.chat_rows]
+            for t, texts in self.world.plain_rows:      # Claude 5.11+ layout: texts after the title, as uia reads them
+                row = Row(texts[0] if texts else "Idle", t, False)
+                row.texts = tuple(texts)
+                r.rows.append(row)
         r.open_titles = set(self.world.open)
         r.usage = self.world.usage
         return r
@@ -139,6 +143,9 @@ class World(object):
         self.turn_ends = []       # when main-thread turns ended (Stop hooks ran)
         self.chat_rows = []       # (title, status) what the chat tab lists with a status: chats, project sessions
         self.chats = []           # (title, None) plain chats in the chat tab's Recents
+        self.plain_rows = []      # (title, texts) chat-tab rows in Claude 5.11+'s layout: status/subtitle texts alike
+        self.no_mode = False      # the Claude | Code switch isn't found in this reading
+        self.exe = None           # the Claude.exe owning the window (its bundle holds the error titles)
         self.open = []
         self.toasts = {}          # id -> ClaudeToast
         self.access = True
@@ -161,7 +168,8 @@ class MonitorScenarios(unittest.TestCase):
         self.world = w = World()
         self.clock = Clock()
         self._saved = (M.claude_window_state, M.UiaReader, M.NotificationReader, M.time.time, M.claude_in_view,
-                       M.TranscriptUsage, M.PlanHistory)
+                       M.TranscriptUsage, M.PlanHistory, M.claude_exe, M._ERROR_TITLE)
+        M.claude_exe = lambda hwnd: w.exe
         M.TranscriptUsage = lambda: FakeTranscripts(w)
         M.PlanHistory = lambda: FakeHistory(w)
         M.claude_window_state = lambda: (1234, "hidden" if w.hidden else "visible") if w.running else (0, "not running")
@@ -173,7 +181,7 @@ class MonitorScenarios(unittest.TestCase):
 
     def tearDown(self):
         (M.claude_window_state, M.UiaReader, M.NotificationReader, M.time.time, M.claude_in_view,
-         M.TranscriptUsage, M.PlanHistory) = self._saved
+         M.TranscriptUsage, M.PlanHistory, M.claude_exe, M._ERROR_TITLE) = self._saved
 
     def poll(self, seconds=1.0):
         self.clock.t += seconds
@@ -765,6 +773,93 @@ class MonitorScenarios(unittest.TestCase):
         w.chat_rows = []
         self.assertEqual(self.poll(60).level, model.IDLE)
 
+    def test_a_reading_without_the_mode_switch_doesnt_make_chats_code_sessions(self):
+        # Reported 2026-11-26: one reading on the chat tab without the Claude | Code switch took its chats for Code
+        # sessions; from then on the chat tab kept them, with their subtitles as "Ran into a problem".
+        w = self.world
+        w.rows = [("Some session", "Idle")]
+        self.poll()
+        w.sidebar_visible, w.chat_tab = False, True
+        w.plain_rows = [("X account growth analysis", ("Running",)), ("Morning AI digest + follow list", ("Daily",))]
+        w.no_mode = True                               # the switch is being redrawn
+        s = self.poll()
+        self.assertEqual((s.level, s.working, s.cards), (model.IDLE, 0, []))
+        w.no_mode = False
+        w.plain_rows = [("X account growth analysis", ("Includes an artifact",)),
+                        ("Morning AI digest + follow list", ("Daily",))]
+        s = self.poll()
+        self.assertEqual((s.level, s.needs_me, s.cards), (model.IDLE, 0, []))
+
+    def test_without_the_switch_a_session_with_a_transcript_still_counts(self):
+        # Chats have no Claude Code transcript, so a row whose title the transcripts speak for is a Code session even
+        # if it was never seen on the Code tab (the switch missing from the start, e.g. after an update).
+        w = self.world
+        w.sidebar_visible, w.chat_tab, w.no_mode = False, True, True
+        w.local = {"New code"}
+        w.plain_rows = [("New code", ("Awaiting input",)), ("Some chat", ("Awaiting input",))]
+        s = self.poll()
+        self.assertEqual((s.needs_me, [c.title for c in s.cards]), (1, ["New code"]))
+
+    def test_error_titles_from_claudes_own_files(self):
+        # A title a Claude update adds is read from its installed bundle (once per Claude.exe), so it counts as a problem
+        # rather than a subtitle; when the bundle can't be read the built-in titles still count.
+        import shutil
+        import tempfile
+        if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))    # run on its own, not via discover
+        from test_claude_bundle import make_asar, table
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "app", "resources"))
+        make_asar(os.path.join(d, "app", "resources", "ion-dist.asar"),
+                  {"assets/v1/e.js": b"x=" + table(["Connection lost", "Gremlins ate {thing}"] +
+                                                   ["T%d" % i for i in range(60)])})
+        logs = []
+        self.m.log = logs.append
+        w = self.world
+        w.rows = [("Deploy", "Idle"), ("Docs", "Idle")]
+        self.poll()
+        w.sidebar_visible, w.chat_tab = False, True
+        w.plain_rows = [("Deploy", ("Gremlins ate my session",)), ("Docs", ("Session was interrupted",))]
+
+        def cards(s):
+            return sorted((c.title, c.kind) for c in s.cards)
+        # First a Claude whose bundle can't be read: the built-in titles still count, a title only in the bundle isn't
+        # known yet (a subtitle).
+        w.exe = os.path.join(d, "gone", "Claude.exe")
+        s = self.poll()
+        self.assertTrue(any(l.startswith("can't read Claude's error titles") for l in logs))
+        self.assertEqual(cards(s), [("Docs", model.PROBLEM)])
+        self.assertIn("Gremlins ate my session", self.m.not_statuses)
+        # An update: a new Claude.exe whose bundle can be read. Its new title counts from then on.
+        w.exe = os.path.join(d, "app", "Claude.exe")
+        s = self.poll()
+        self.assertEqual(cards(s), [("Deploy", model.PROBLEM), ("Docs", model.PROBLEM)])
+        self.assertIn("Claude's error titles: 62 in its files, 61 of them not built in", logs)
+        logs[:] = []
+        self.poll()
+        self.assertFalse([l for l in logs if "error titles" in l])          # read once per Claude.exe
+        # Another update with no readable bundle: what is known stays known, the built-in titles included.
+        w.exe = os.path.join(d, "gone2", "Claude.exe")
+        s = self.poll()
+        self.assertTrue(any(l.startswith("can't read Claude's error titles") for l in logs))
+        self.assertEqual(cards(s), [("Deploy", model.PROBLEM), ("Docs", model.PROBLEM)])
+
+    def test_a_subtitle_isnt_a_problem(self):
+        # Claude 5.11+ shows a status and a subtitle alike, as plain text after the title: a known session listed with
+        # "Daily" (a scheduled task) or "Includes an artifact" isn't in trouble; one of Claude's error titles is.
+        w = self.world
+        w.rows = [("Morning AI digest + follow list", "Idle"), ("Deploy", "Idle")]
+        self.poll()
+        w.sidebar_visible, w.chat_tab = False, True
+        w.plain_rows = [("Morning AI digest + follow list", ("Daily",)), ("Deploy", ("Includes an artifact",))]
+        s = self.poll()
+        self.assertEqual((s.level, s.needs_me, s.cards), (model.IDLE, 0, []))
+        self.assertEqual(self.m.not_statuses, {"Daily", "Includes an artifact"})
+        w.plain_rows = [("Morning AI digest + follow list", ("Daily",)), ("Deploy", ("Couldn’t connect to devbox",))]
+        s = self.poll()
+        self.assertEqual((s.needs_me, [(c.title, c.kind) for c in s.cards]), (1, [("Deploy", model.PROBLEM)]))
+
     def test_chat_tab_remembers_code_sessions_it_doesnt_list(self):
         w = self.world
         w.rows = [("Voice plugin", "Running"), ("Claude mini", "Running"), ("Old one", "Unread response")]
@@ -1272,6 +1367,24 @@ class Classifiers(unittest.TestCase):
             self.assertEqual(c(label), M.NEEDS, label)
             self.assertTrue(M.is_problem(label), label)
         self.assertFalse(M.is_problem("Awaiting input"))
+
+    def test_plain_row_status(self):
+        # Claude 5.11+: the texts after a row's title are its status, a subtitle or a caption, all alike.
+        def status(*texts):
+            row = Row(texts[0] if texts else "Idle", "T", False)
+            row.texts = texts
+            return M.plain_status(row, others)
+        others = set()
+        self.assertEqual(status("Includes an artifact"), "Idle")
+        self.assertEqual(status("Daily"), "Idle")
+        self.assertEqual(status("Daily", "Running"), "Running")
+        self.assertEqual(status(), "Idle")
+        self.assertEqual(others, {"Includes an artifact", "Daily"})
+        for label in ("Awaiting input", "Unread response", "#12 · Open", "Connection lost",
+                      "Lost connection to devbox", "Claude Code on my-box stopped abruptly", "Session was interrupted",
+                      "Couldn’t access Projects", "Something went wrong"):
+            self.assertEqual(status(label), label, label)
+        self.assertEqual(M.plain_status(Row("Anything", "T", False)), "Anything")    # another layout: its own label
 
     def test_toast_bodies(self):
         c = M.classify_toast

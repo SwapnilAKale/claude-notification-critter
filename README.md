@@ -285,8 +285,9 @@ arms and four legs), with its own loop for every state:
 Per session (from the sidebar, read via UI Automation): **Awaiting input** (permission, question and plan approval all
 show as this), **Awaiting answer**, **Unread response** (the blue dot), **Running**, **Using the browser**, **Idle**,
 **Done**, **Archived**. Also recognised if they appear: Needs input, Needs you, Waiting on you, Waiting for your answer,
-Plan ready for review, Needs your approval · <tool>, and anything with failed/error/problem. Unknown labels are shown
-as a warning, not ignored. The Claude/Code toggle also carries an aggregate ("Code, awaiting your input" /
+Plan ready for review, Needs your approval · <tool>, and anything with failed/error/problem. On older Claude versions
+(a status icon of its own) unknown labels are shown as a problem, not ignored; since 5.11 any other text is a subtitle
+(see **Errors** under Limitations). The Claude/Code toggle also carries an aggregate ("Code, awaiting your input" /
 "Code, unread activity"). The sidebar's own filter has no status filter (it's Active/Archived/All plus environment).
 Details: [RECON.md](RECON.md).
 
@@ -341,9 +342,18 @@ Details: [RECON.md](RECON.md).
   while it's on its Claude tab, but only every few minutes while it's on the Code tab (seen: 4 minutes for a
   10-second answer). It marks nothing when it does find out (no unread label, no notification). So the blob couldn't
   tell you more than a glance at Claude, and chats running on the chat tab don't make it work either.
-- **Errors:** Claude shows about 115 different titles for what went wrong ("Connection lost", "Session was
-  interrupted", ...). Any label that isn't a known status or a pull-request state is shown as a problem card in
-  Claude's own words.
+- **Errors:** Claude shows 166 different titles (in 6.28899) for what went wrong ("Connection lost", "Session was
+  interrupted", ...). Where a row's status has its own icon (older Claude versions), any label that isn't a known
+  status or a pull-request state is shown as a problem card in Claude's own words. Since Claude 5.11 a status is plain
+  text next to other texts, such as a chat's "Includes an artifact" or a scheduled task's "Daily". There only a known
+  status or one of Claude's error titles counts. Any other text is taken for a subtitle and noted once in the
+  diagnostic log ("row texts taken for subtitles, not statuses: ..."). The error titles are read from Claude's own
+  installed files (`resources\ion-dist.asar` next to `Claude.exe`, read only, once per Claude version), so a later
+  Claude's new titles count too. The log says how many it found ("Claude's error titles: ..."). If they can't be read,
+  the 166 copied from Claude 6.28899 are used, and a new title then shows up in the log instead of as a card, unless
+  it has a word like "couldn't" or "failed" in it.
+- A reading that can't find the Claude | Code switch is treated like the chat tab: only sessions already seen on the
+  Code tab or with a Claude Code transcript (chats have none) count, so chats are never taken for Code sessions.
 - If Claude's sidebar is hidden or the window is narrow, the blob keeps the last reading, adds new notifications on
   top, and shows a warning if that lasts more than a few seconds.
 - Labels are matched in English.

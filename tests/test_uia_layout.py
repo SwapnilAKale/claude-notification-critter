@@ -158,6 +158,34 @@ class SidebarLayouts(unittest.TestCase):
         self.assertEqual(rows(tree), ([("Realtime voice agent integration", "Running"),
                                        ("Make the blob critter bigger and 3D", "Idle")], True))
 
+    def test_claude_6_rows_keep_every_text_that_could_be_the_status(self):
+        # Seen 2026-11-26 (Claude 6.28899, chat tab): a chat's "Includes an artifact" and a scheduled task's "Daily"
+        # sit where a status would; monitor.plain_status decides which text is one.
+        def row(title, *texts):
+            return G(G(El(U.CT_HYPERLINK, "%s %s" % (title, " ".join(texts)), G(G(T(title), *[T(t) for t in texts]))),
+                       G(B("More options for " + title))))
+        reader = U.UiaReader.__new__(U.UiaReader)
+        pairs, count = [], [0]
+        reader._collect(G(row("X account growth analysis", "Includes an artifact"),
+                          row("Morning AI digest + follow list", "Daily", "Running"),
+                          row("Forked one", "Forked from X", "Cloud · Merged"),
+                          row("Quiet one")), pairs, 0, count)
+        self.assertEqual([(r.title, r.texts, r.env) for r, _ in pairs],
+                         [("X account growth analysis", ("Includes an artifact",), None),
+                          ("Morning AI digest + follow list", ("Daily", "Running"), None),
+                          ("Forked one", (), "Cloud"),
+                          ("Quiet one", (), None)])
+
+    def test_other_layouts_have_no_plain_texts(self):
+        self.assertEqual([r.texts for r, _ in self._pairs(G(code_row("Fix login", "Awaiting input")))], [None])
+
+    @staticmethod
+    def _pairs(tree):
+        reader = U.UiaReader.__new__(U.UiaReader)
+        pairs, count = [], [0]
+        reader._collect(tree, pairs, 0, count)
+        return pairs
+
     def test_a_hyperlink_row_is_what_a_click_opens(self):
         # Opening a session from the blob clicks the element paired with its row (or, on the chat tab, a plain entry
         # named with the title): with Claude 6 that's the Hyperlink itself.

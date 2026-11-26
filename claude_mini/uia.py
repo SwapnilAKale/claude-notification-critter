@@ -85,13 +85,16 @@ def parse_caption(text):
 
 
 class Row(object):
-    __slots__ = ("status", "title", "offscreen", "beside", "env", "env_state")
+    __slots__ = ("status", "title", "offscreen", "beside", "env", "env_state", "texts")
 
     def __init__(self, status, title, offscreen, beside=False, env=None, env_state=None):
         self.status, self.title, self.offscreen = status, title, offscreen
         self.beside = beside            # chat-tab layout (status next to the row): a chat, or a project session
         self.env = env                  # "Cloud" for a cloud session, else None (runs on this computer)
         self.env_state = env_state      # the state its caption shows ("Merged", "Working", ...), if any
+        # Claude 5.11+ layout: the row's texts after its title that could be its status (a status and a subtitle such
+        # as "Includes an artifact" look alike there; monitor.plain_status tells them apart). None in other layouts.
+        self.texts = None
 
     def __repr__(self):
         return "Row(%r, %r)" % (self.status, self.title)
@@ -348,15 +351,17 @@ class UiaReader(object):
         menu = "More options for " + title
         if not any(self._has_button(s, menu, 0) for s in siblings if s is not button):
             return None
-        status, env = None, None
+        others, env = [], None
         for text in texts[1:]:
             caption = parse_caption(text)
             if caption:
                 env = env or caption
             elif not _SUBTITLE.match(text):
-                status = status or text
-        return Row(status or "Idle", title, bool(button.get_int(E_CACHED_ISOFFSCREEN)), False,
-                   *(env or (None, None)))
+                others.append(text)
+        row = Row(others[0] if others else "Idle", title, bool(button.get_int(E_CACHED_ISOFFSCREEN)), False,
+                  *(env or (None, None)))
+        row.texts = tuple(others)
+        return row
 
     def _texts(self, elements, depth):
         """The Texts inside a row, in order (not inside a nested Button such as "Hide nested sessions ...")."""

@@ -21,7 +21,7 @@ import threading
 import time
 import traceback
 
-from . import com, model, win32
+from . import claude_bundle, com, model, win32
 from .claude_window import claude_window_state
 from .notifications import ALLOWED, NotificationReader
 from .uia import Row, UiaReader
@@ -58,6 +58,123 @@ _IDLE_EXACT = {"idle", "done", "resolved", "archived", "stopped", "completed"}
 _PR_LABELS = {"no pull request", "open", "draft", "approved", "changes requested", "merge conflicts", "queued",
               "merged", "closed"}
 _ERROR_WORDS = re.compile(r"\b(error|errored|failed|failure|problem|crashed|couldn.t|could not)\b", re.I)
+# The titles Claude's status icon shows when a session ran into trouble (Claude 6.28899's bundle, ion-dist.asar; "{host}"
+# and the like stand for a name). Claude 5.11+ shows a row's status as plain text next to other texts, so only these and
+# the labels above count as a status there (see plain_status).
+_ERROR_TITLES = (
+    'Something went wrong', 'Claude Code crashed', 'Claude Code keeps crashing',
+    'Claude Code on {host} stopped abruptly', 'Claude Code on {host} stopped before finishing',
+    'Claude Code stopped before finishing', "Claude Code couldn't start", "Couldn't download Claude Code",
+    "Couldn't install Claude Code", "Couldn't verify your sign-in", "Couldn't renew your AWS sign-in",
+    'Organization not allowed on this computer', 'Your subscription is paused', 'Sign in again to continue',
+    'Update Claude to continue', "Couldn't access this GitHub repository", 'Connection lost',
+    'Claude lost network access', 'Computer went to sleep', "Couldn't connect through your proxy",
+    'The response stopped arriving', 'No response from the gateway', 'No response after retrying', "Couldn't connect",
+    'Claude no longer has the earlier messages', 'Folder not found', 'Folder path is too long',
+    "Couldn't access {folderName}", "Couldn't access this cloud-synced folder", 'Git is required',
+    "Git isn't working", "The Xcode license hasn't been accepted", "This folder isn't a Git repository",
+    'Claude Code was stopped while starting', 'Security software is blocking Claude Code',
+    "This version of macOS isn't supported", "The version of macOS on {host} isn't supported",
+    "This computer's processor isn't supported", 'Missing system library', "Couldn't read or write session files",
+    'Not enough disk space', 'Claude Code stopped responding', 'Unexpected output from Claude Code',
+    "This workspace isn't trusted", 'Resume imported session?', "This repository isn't trusted yet",
+    'Continue this conversation?', 'Already inside a Claude Code session', 'Bypass permissions was blocked',
+    'This session needs auto mode', 'This model needs strict sandbox mode', "Blocked by your organization's policy",
+    'Desktop plugins blocked by your organization', 'Desktop plugins blocked on {host}',
+    'Desktop plugins blocked in this distribution', 'Managed settings kept Claude Code from starting',
+    "Your organization doesn't allow this API key or provider", "This account isn't allowed on this computer",
+    "This account isn't allowed on {host}", "The proxy setting isn't a valid URL",
+    "Couldn't use Claude Code's temporary folder", "Claude Code can't read a configuration file",
+    "Claude Code on {host} can't read a configuration file", 'This session is running in the background',
+    'This session may be open somewhere else', "Couldn't check this session's worktree",
+    "This session's worktree can't be reopened", 'Claude Code needs an update',
+    "Couldn't load your organization's settings", "Claude Code couldn't start with this account",
+    'A telemetry setting is blocking Claude Code', 'Session was interrupted', 'Claude Code stopped after responding',
+    'Remote Control disconnected', "This session's machine stopped responding",
+    "Can't use your organization's session host from this device", "Couldn't complete that",
+    'No connection to your model provider', 'Cloud session stopped responding',
+    "This session's environment was deleted", 'Claude Code on your computer needs to sign in again',
+    'Claude Code on {host} needs to sign in again', "This session can't continue", "Session couldn't start",
+    "Can't reach your computer", "Can't reach {host}", 'Claude Code was closed on your computer',
+    'Claude Code was closed on {host}', "Remote Control didn't finish connecting",
+    'Remote Control was turned off on your computer', 'Remote Control was turned off on {host}',
+    'Claude Code on your computer is signed in to a different account',
+    'Claude Code on {host} is signed in to a different account',
+    'Your computer is no longer connected to this session', 'Lost connection to {host}', "Couldn't connect to {host}",
+    "This session's SSH connection was removed or replaced", 'Claude is signed out on {host}',
+    'This session is still running on {host}', 'Stopped Claude Code on {host}',
+    "{host} doesn't have this conversation right now", "Couldn't rewind", "Couldn't check out the branch",
+    "Couldn't create a worktree on {host}", 'Check the repository on {host}',
+    'The worktree check on {host} was cut short', 'Check how Git stores a file on {host}',
+    'Fix a link in the repository on {host}', 'Check what else writes to the folder on {host}',
+    'Turn off Worktree, or fix Git LFS on {host}', 'Free up disk space on {host}',
+    'Free up space or raise your disk quota on {host}', "Git can't run on {host}",
+    "The Xcode license hasn't been accepted on {host}",
+    "A link in ~/.claude/remote leads into one of this session's folders",
+    'This session uses a folder reserved for the app', "Couldn't check a folder on {host}",
+    'Worktree setup on {host} timed out', "Your WorktreeCreate hook didn't return a usable worktree",
+    'Worktree needs repair', "Couldn't create a worktree in this repository",
+    "This session's branch is checked out in another folder", "Couldn't set up Git for this session",
+    'Folder not allowed by your organization', "An added folder's path isn't supported",
+    "Couldn't check this folder on {host}", "Can't open this folder on {host}",
+    "WSL sessions aren't available on this device", "Local sessions aren't available on this device",
+    'Code sessions are turned off by your organization',
+    "Claude Code can't start through your organization's launcher",
+    "Your organization's launcher didn't start Claude Code", "Claude Code couldn't sign in",
+    "Ask your IT team to fix your organization's launcher",
+    "Your organization's launcher started a different Claude Code version",
+    "Claude Code on {host} can't start through your organization's launcher",
+    "Your organization's launcher isn't set up on {host}", "Claude Code can't start on {host}",
+    "{host} doesn't have the right version of Claude Code yet",
+    "Your organization's setup on {host} stopped this session", "Couldn't check the setup on {host}",
+    'The setup on {host} just changed', 'Automatic restarts are paused on {host}',
+    'Claude Code took too long to start on {host}', "Claude Code can't start on {host} with a Claude account",
+    "Claude Code can't start on {host} from this computer",
+    "This version of Claude can't start Claude Code on {host}",
+    "Claude Code's managed settings on {host} can't be read", "Claude's server on {host} needs an update",
+    "Couldn't update Claude's server on {host}",
+    "Your organization's launcher on {host} didn't start Claude Code during setup",
+    "Your organization's launcher on {host} didn't start Claude Code",
+    "Your organization's launcher on {host} started a different Claude Code version",
+    "SSH to this device isn't available", "Your organization doesn't allow this SSH connection",
+    'Your SSH configuration has an unsupported HostName', 'Ask your admin to allow SSH to {host}',
+    "SSH sessions can't use your model provider settings", 'SSH host or username has unsupported characters',
+    "A required sandbox isn't available", "Claude Code's files are locked", "Couldn't start Claude Code on {target}",
+    "Couldn't start Claude Code on {host}", 'Folder not found on {host}', 'Claude Code is out of date',
+    "Session isn't running yet",
+)
+
+
+def _title_key(t):
+    return " ".join(t.split()).lower().replace("\u2019", "'")
+
+
+def _title_matcher(titles):
+    return re.compile("^(?:%s)$" % "|".join(
+        ".+".join(re.escape(part) for part in re.split(r"\{\w+\}", _title_key(t))) for t in titles))
+
+
+_ERROR_TITLE = _title_matcher(_ERROR_TITLES)
+
+
+def use_error_titles(titles):
+    """Know these error titles too (read from Claude's installed files, so a Claude update's new ones count); the
+    built-in ones always stay. Returns how many of them weren't built in."""
+    global _ERROR_TITLE
+    built_in = {_title_key(t) for t in _ERROR_TITLES}
+    new = [t for t in titles if _title_key(t) not in built_in]
+    _ERROR_TITLE = _title_matcher(tuple(_ERROR_TITLES) + tuple(new))
+    return len(new)
+
+
+def _is_error_title(s):
+    """One of Claude's error titles (any case or spacing)."""
+    return bool(_ERROR_TITLE.match(_title_key(s)))
+
+
+def claude_exe(hwnd):
+    """The path of the Claude.exe that owns this window, or None."""
+    return win32.process_path(win32.window_pid(hwnd)) if hwnd else None
 
 
 def classify_status(label):
@@ -71,7 +188,9 @@ def classify_status(label):
     if s in _IDLE_EXACT or s.split(" · ")[-1] in _PR_LABELS:
         return IDLE
     # Claude's status icon only ever carries the labels above, a pull-request state, or the title of what went wrong
-    # ("Connection lost", "Session was interrupted", ... about 115 of them, see RECON.md). So anything else is a problem.
+    # ("Connection lost", "Session was interrupted", ... 166 of them in Claude 6.28899, _ERROR_TITLES). So anything else
+    # is a problem. This holds where the label is the status icon's own; in Claude 5.11+'s plain-text layout a text is
+    # first checked by plain_status, which takes unknown text for a subtitle.
     return NEEDS if s else None
 
 
@@ -79,8 +198,24 @@ def _known_status(label):
     """A label Claude uses for a session's state (not the "anything else is a problem" fallback), or an error."""
     s = " ".join(label.split()).lower()
     return bool(s) and (s in _NEEDS_EXACT or s in _NEW_EXACT or s in _WORKING_EXACT or s in _IDLE_EXACT or
-                        s.startswith(("awaiting", "needs your approval", "unread")) or s in _PR_LABELS or
-                        bool(_ERROR_WORDS.search(s)))
+                        s.startswith(("awaiting", "needs your approval", "unread")) or
+                        s.split(" · ")[-1] in _PR_LABELS or bool(_ERROR_WORDS.search(s)) or _is_error_title(s))
+
+
+def plain_status(row, others=None):
+    """The status of a Claude 5.11+ row, whose texts after the title are its status, a subtitle or a caption, all
+    alike: the first that is a label Claude uses for a state or one of its error titles. Any other text ("Includes an
+    artifact" on a chat, "Daily" on a scheduled task) isn't a status, and is added to `others`. Reported 2026-11-26:
+    such subtitles showed as "Ran into a problem" cards."""
+    texts = getattr(row, "texts", None)
+    if texts is None:
+        return row.status                    # another layout: the text is the status icon's own label
+    for t in texts:
+        if _known_status(t):
+            return t
+    if others is not None:
+        others.update(texts)
+    return "Idle"
 
 
 def cloud_status(row):
@@ -330,11 +465,12 @@ class _Remembered(Row):
         self.cap = cap
 
 
-def chat_tab_rows(listed, remembered, aggregate):
+def chat_tab_rows(listed, remembered, aggregate, local=()):
     # The chat tab also lists chats, which can look just like Code sessions (Claude 2.37+); only rows already known as
-    # Code sessions count. The rest of Code is covered by the Code toggle's summary.
-    known = {r.title for r in remembered or ()}
-    listed = [r for r in listed if r.title in known]
+    # Code sessions count: seen on the Code tab, or with a transcript (`local`; a chat has none). The rest of Code is
+    # covered by the Code toggle's summary.
+    known = {_norm(r.title) for r in remembered or ()} | {_norm(t) for t in local}
+    listed = [r for r in listed if _norm(r.title) in known]
     titles = {_norm(r.title) for r in listed}
     # No summary: Claude 5.11 shows none at all, so it says nothing (it used to mean nothing was going on).
     cap = classify_status(aggregate) if aggregate else None
@@ -421,6 +557,8 @@ class Monitor(threading.Thread):
         self.ring_since = 0.0                # ... and since when it has shown it
         self.last_reset = {}                 # limit kind -> when it last reset, as far as the readings tell
         self.code_rows = None                # last Code-tab reading (the chat tab lists only project sessions)
+        self.not_statuses = set()            # row texts taken for subtitles, not statuses (logged once each)
+        self.titles_from = None              # the Claude.exe whose installed files the error titles were read from
         self.last_open = set()
         self.unreadable_since = None
         self.warn_since = {}
@@ -583,6 +721,28 @@ class Monitor(threading.Thread):
                 del self.items[k]
         return True
 
+    def _read_error_titles(self, hwnd):
+        """Once per Claude version (its Claude.exe path changes with every update): its error titles, from its own
+        installed files, read only. If they can't be read, the titles built in still count."""
+        try:
+            exe = claude_exe(hwnd)
+        except Exception:
+            exe = None
+        if not exe or exe == self.titles_from:
+            return
+        self.titles_from = exe
+        try:
+            titles = claude_bundle.error_titles(claude_bundle.asar_path(exe))
+            why = "no table of them found"
+        except Exception as e:
+            titles, why = None, "%s: %s" % (type(e).__name__, e)
+        if titles:
+            self.log("Claude's error titles: %d in its files, %d of them not built in" % (
+                len(titles), use_error_titles(titles)))
+        else:
+            self.log("can't read Claude's error titles from its files (%s): using the %d built in" % (
+                why, len(_ERROR_TITLES)))
+
     # ---------- one reading ----------
     def _poll(self):
         snap = model.Snapshot()
@@ -599,6 +759,7 @@ class Monitor(threading.Thread):
             self.unreadable_since = None
             return snap
 
+        self._read_error_titles(hwnd)
         toasts = self._read_toasts(snap)
         reading = None
         if state == "visible":
@@ -672,15 +833,27 @@ class Monitor(threading.Thread):
         if reading is not None and reading.complete and reading.mode_found:
             self.health_ok.add("mode")                                         # the Claude | Code switch is there
         if fresh:
+            others = set()
+            for r in reading.rows:
+                r.status = plain_status(r, others)
+            new = others - self.not_statuses
+            if new and len(self.not_statuses) < 500:
+                self.not_statuses |= new
+                self.log("row texts taken for subtitles, not statuses: " + ", ".join(sorted(t[:40] for t in new)))
             cloud = "; ".join("%s=%s/%s" % (r.title[:28], r.status, r.env_state) for r in reading.rows if r.env)
             if cloud != getattr(self, "_last_cloud", None):
                 self._last_cloud = cloud
                 self.log("cloud rows: " + (cloud or "-"))      # status icon / caption state, as Claude shows them
             for r in reading.rows:
                 r.status = cloud_status(r)
-            if chat_tab:
-                self.last_rows = with_transcript_turns(chat_tab_rows(reading.rows, self.code_rows, reading.aggregate),
-                                                       working, local, demote=not reading.aggregate)
+            if not (reading.mode_found and reading.code_selected is True):
+                # The chat tab, or a reading that can't tell which tab is showing (the Claude | Code switch not found
+                # for a moment): chats look just like Code sessions, so only rows already known from the Code tab count.
+                # Reported 2026-11-26: such a reading on the chat tab took two chats for Code sessions, and from then on
+                # the chat tab kept them as "Ran into a problem".
+                self.last_rows = with_transcript_turns(
+                    chat_tab_rows(reading.rows, self.code_rows, reading.aggregate if chat_tab else "", local),
+                    working, local, demote=not (chat_tab and reading.aggregate))
             else:
                 self.code_rows = reading.rows
                 self.last_rows = with_transcript_turns(reading.rows, working, local, demote=False)
@@ -723,8 +896,9 @@ class Monitor(threading.Thread):
                                       "needs-you still show (from Claude Code's records and Claude's notifications); "
                                       "unread and cloud sessions are paused."))
         elif reading is not None and reading.complete and reading.sidebar_found and not reading.mode_found:
-            health.append(("mode", "Can't find Claude's Claude | Code switch: an update changed it. Telling the chat "
-                                   "tab from the Code tab is paused; everything else still works."))
+            health.append(("mode", "Can't find Claude's Claude | Code switch: an update changed it. Chats can't be "
+                                   "told from Code sessions, so new cloud sessions in the sidebar are paused; "
+                                   "everything else still works."))
         if reading is not None and reading.usage and ring is None and \
                 not reading.usage[len("Usage:"):].strip().lower().startswith("context"):
             health.append(("ring", "Can't read Claude's usage ring. Usage still comes from your hook and Claude's "
