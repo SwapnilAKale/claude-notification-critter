@@ -114,6 +114,9 @@ class FakeTranscripts(object):
     def working(self, now=None):
         return set(self.world.working)
 
+    def background(self, now=None):
+        return dict(self.world.background)
+
 
 class FakeHistory(object):
     def __init__(self, world):
@@ -138,6 +141,7 @@ class World(object):
         self.limit_stops = {}     # session title -> its last request, refused at the usage limit
         self.sample = None        # Claude's own newest usage sample: (when, {"5-hour": pct, "weekly": pct})
         self.working = set()      # titles of sessions whose transcript shows a turn under way
+        self.background = {}      # title -> sub-agents / background commands it started that still run
         self.local = set()        # titles of the local sessions the transcripts speak for
         self.last_activity = None  # when any session last made a request
         self.turn_ends = []       # when main-thread turns ended (Stop hooks ran)
@@ -859,6 +863,49 @@ class MonitorScenarios(unittest.TestCase):
         w.plain_rows = [("Morning AI digest + follow list", ("Daily",)), ("Deploy", ("Couldn’t connect to devbox",))]
         s = self.poll()
         self.assertEqual((s.needs_me, [(c.title, c.kind) for c in s.cards]), (1, [("Deploy", model.PROBLEM)]))
+
+    def test_background_work_keeps_a_session_working_and_holds_its_finished_news(self):
+        # Reported 2026-11-27: a session's turn ended while the checkers it started still ran, and the critter
+        # celebrated. Until they're done it's working; then its news shows.
+        w = self.world
+        w.rows = [("Claude mini", "Running"), ("Other", "Idle")]
+        self.poll()
+        w.rows = [("Claude mini", "Unread response"), ("Other", "Idle")]
+        w.toast("Claude mini", "Claude finished a task")
+        w.local = {"Claude mini", "Other"}
+        w.background = {"Claude mini": 2}
+        s = self.poll()
+        self.assertEqual((s.level, s.working, s.finished, s.background, s.cards), (model.WORKING, 1, 0, 2, []))
+        self.assertEqual(s.summary(), "1 working · 2 in the background")
+        self.assertFalse(s.asleep)
+        w.background = {}                              # the checkers are done
+        s = self.poll()
+        self.assertEqual((s.level, s.finished, [c.title for c in s.cards]), (model.NEW, 1, ["Claude mini"]))
+
+    def test_on_the_chat_tab_codes_unread_summary_waits_for_background_work(self):
+        # "Code, unread activity" can't say which session it means: while any session's background work runs, it may
+        # be that one's, so it waits too.
+        w = self.world
+        w.sidebar_visible, w.chat_tab, w.aggregate = False, True, "unread activity"
+        w.background = {"Claude mini": 1}
+        s = self.poll()
+        self.assertEqual((s.level, s.working, s.finished, s.cards), (model.WORKING, 1, 0, []))
+        w.background = {}
+        s = self.poll()
+        self.assertEqual((s.level, s.finished, [c.title for c in s.cards]), (model.NEW, 1, ["Claude Code"]))
+
+    def test_background_work_never_hides_a_session_needing_you(self):
+        w = self.world
+        w.rows = [("Claude mini", "Awaiting input")]
+        w.background = {"Claude mini": 1}
+        s = self.poll()
+        self.assertEqual((s.level, s.needs_me), (model.NEEDS_ME, 1))
+
+    def test_background_work_of_a_session_the_sidebar_doesnt_list(self):
+        w = self.world
+        w.background = {"Started elsewhere": 1}
+        s = self.poll()
+        self.assertEqual((s.level, s.working), (model.WORKING, 1))
 
     def test_chat_tab_remembers_code_sessions_it_doesnt_list(self):
         w = self.world

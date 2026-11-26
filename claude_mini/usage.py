@@ -24,6 +24,11 @@ SCAN_EVERY = 2.0            # s between looks at the transcripts folder
 ACTIVE_S = 6 * 3600         # a session written to this recently may have sub-agents worth looking at
 STOPPED_S = 7 * 86400       # ... and this recently, for a session still stopped at the usage limit
 TURN_QUIET_S = 900          # a turn whose transcript hasn't been written for this long isn't taken for working
+BG_FIRST_BYTES = 4 * 1024 * 1024   # a transcript first seen: how much of its end to look through for background tasks
+BG_MAX_READ = 8 * 1024 * 1024      # ... and at most this much of what was added since, per look
+BG_DONE_SLACK = 10.0        # a sub-agent's transcript written this long after its completion notice: it was resumed
+_BG_OUTPUT = re.compile(r"Output is being written to: (.+?\.output)")
+_BG_NOTICE = re.compile(r"<task-id>([^<]+)</task-id>")
 MAX_TTL = 3600              # the longest a prompt cache lives (the 1-hour cache)
 CHECK_SLACK = 60            # gaps this close to the TTL are too close to call for the cache check
 MAX_CONTEXTS = 5
@@ -36,6 +41,16 @@ def _json(raw):
         return json.loads(raw)
     except ValueError:
         return None
+
+
+def _text_of(content):
+    """The plain text in a message's content (a string, or blocks holding text or tool results)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_text_of(b.get("content") if b.get("type") == "tool_result" else b.get("text"))
+                         for b in content if isinstance(b, dict))
+    return ""
 
 
 def _epoch(iso):
@@ -292,6 +307,11 @@ class TranscriptUsage(object):
         self.latest = None          # newest model.Usage
         self.sessions = {}          # main transcript path -> what we know of that session (see _read_tail)
         self.windows = {}           # model -> its context window size, as get_usage reported it for a session on it
+        # Background work a session started (sub-agents, background commands), from its transcript: launched,
+        # then a completion notice with the same task id. A session's turn can end while these still run.
+        self.bg_read = {}           # main transcript path -> how far it was looked through for them
+        self.bg = {}                # main transcript path -> {task id: {"kind", "at", "file"}}
+        self.bg_done = {}           # task id -> when its newest completion notice came (any transcript: ids are unique)
         self.ok = True              # the transcripts folder could be read last time
         self.records_ok = True      # ... and Claude's session records
         self.next_scan = 0.0
@@ -354,6 +374,8 @@ class TranscriptUsage(object):
                 self.latest = u
             if os.path.basename(os.path.dirname(path)) == "subagents":
                 continue                    # a sub-agent's cache and context aren't the session's
+            if now - mtime < ACTIVE_S:
+                self._read_background(path, size)
             info = self.sessions.setdefault(path, {"title": None, "last_at": None, "ttl": None, "tokens": None,
                                                    "window": None, "hook_pct": None, "check": None, "mtime": None,
                                                    "model": None, "root": None, "compacted": False,
@@ -447,6 +469,101 @@ class TranscriptUsage(object):
                     owner not in self.archived:
                 out.add(info["title"])
         return out
+
+    def background(self, now=None):
+        """Title -> how many background tasks (sub-agents, background commands) it started are still running: launched
+        and no completion notice since (a sub-agent written to after its notice was resumed). One that hasn't written
+        anything for TURN_QUIET_S doesn't count (it crashed, or waits on nothing we can see). Archived sessions aren't
+        counted. Reported 2026-11-27: the critter celebrated while a session's checkers were still running."""
+        now = time.time() if now is None else now
+        out, gone = {}, []
+        for path, tasks in self.bg.items():
+            info = self.sessions.get(path)
+            owner = self.owner.get(os.path.basename(path)[:-len(".jsonl")])
+            # An archived or untitled session's tasks don't count, but are still forgotten in time (below).
+            counts = bool(info and info["title"]) and owner not in self.archived
+            n = 0
+            for tid, t in tasks.items():
+                try:
+                    written = os.stat(t["file"]).st_mtime if t["file"] else None
+                except OSError:
+                    written = None
+                done = self.bg_done.get(tid)
+                if done is not None and done >= t["at"] and not (
+                        t["kind"] == "agent" and written is not None and written > done + BG_DONE_SLACK):
+                    if now - max(done, written or 0) > ACTIVE_S:
+                        gone.append((tasks, tid))        # long over: forget it
+                    continue
+                quiet = now - max(t["at"], written or 0)
+                if quiet < TURN_QUIET_S:
+                    n += 1
+                elif quiet > ACTIVE_S:
+                    gone.append((tasks, tid))            # never got a notice (its session was killed): forget it
+            if n and counts:
+                out[info["title"]] = out.get(info["title"], 0) + n
+        for tasks, tid in gone:
+            tasks.pop(tid, None)
+            self.bg_done.pop(tid, None)
+        for path in [p for p, tasks in self.bg.items() if not tasks]:
+            del self.bg[path]
+        return out
+
+    def _read_background(self, path, size):
+        """Look through what was added to a main transcript since last time for background tasks it launched
+        (a tool result carrying "backgroundTaskId", or a sub-agent's "async_launched") and completion notices (an
+        enqueued "<task-notification>" naming the task id). Only the records' own fields count: a message that merely
+        quotes one isn't taken for it."""
+        start = self.bg_read.get(path)
+        if start is None or start > size:
+            start = max(0, size - BG_FIRST_BYTES)       # first look (or the file was rewritten): its recent part
+        if size - start > BG_MAX_READ:
+            start = size - BG_MAX_READ
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(size - start)
+        except OSError:
+            return
+        end = data.rfind(b"\n")
+        if end < 0:
+            return                                       # no complete line yet
+        first = path not in self.bg_read or self.bg_read[path] != start
+        self.bg_read[path] = start + end + 1
+        lines = data[:end].split(b"\n")
+        if first and start > 0:
+            lines = lines[1:]                            # began mid-line
+        tasks = self.bg.setdefault(path, {})
+        sid_dir = path[:-len(".jsonl")]
+        for line in lines:
+            if b'"backgroundTaskId"' in line or b'"async_launched"' in line:
+                o = _json(line.decode("utf-8", "replace"))
+                r = o.get("toolUseResult") if isinstance(o, dict) and o.get("type") == "user" else None
+                if not isinstance(r, dict):
+                    continue
+                at = _epoch(o.get("timestamp")) or time.time()
+                if isinstance(r.get("backgroundTaskId"), str):
+                    m = _BG_OUTPUT.search(_text_of((o.get("message") or {}).get("content")))
+                    tasks[r["backgroundTaskId"]] = {"kind": "command", "at": at, "file": m.group(1) if m else None}
+                elif r.get("status") == "async_launched" and isinstance(r.get("agentId"), str):
+                    tasks[r["agentId"]] = {"kind": "agent", "at": at, "file": os.path.join(
+                        sid_dir, "subagents", "agent-%s.jsonl" % r["agentId"])}
+            elif b"<task-notification>" in line and b'"queue-operation"' in line:
+                o = _json(line.decode("utf-8", "replace"))
+                if not (isinstance(o, dict) and o.get("type") == "queue-operation" and o.get("operation") == "enqueue"):
+                    continue
+                content = o.get("content")
+                if not (isinstance(content, str) and content.lstrip().startswith("<task-notification>")):
+                    continue
+                m = _BG_NOTICE.search(content)
+                at = _epoch(o.get("timestamp"))
+                if m and at is not None:
+                    tid = m.group(1).strip()
+                    self.bg_done[tid] = max(at, self.bg_done.get(tid) or 0)
+        if not tasks:
+            del self.bg[path]
+        if len(self.bg_done) > 5000:                     # notices of tasks launched before what was looked through
+            for tid, _ in sorted(self.bg_done.items(), key=lambda kv: kv[1])[:1000]:
+                del self.bg_done[tid]
 
     def local_titles(self):
         """Titles of the local sessions whose transcripts were read (not archived): those the transcripts speak for."""

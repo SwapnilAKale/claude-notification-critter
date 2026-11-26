@@ -1,5 +1,5 @@
 """System tray icon (the critter, with the blob's status marks) and a small menu (status line, open full size, hide /
-show the critter, reset position, copy the diagnostic log, quit)."""
+show the critter, reset position, copy the diagnostic log, restart, quit)."""
 import ctypes
 
 from . import avatar, model, win32
@@ -7,7 +7,7 @@ from . import gdiplus as G
 from .wnd import Window
 
 WM_TRAY = win32.WM_APP + 1
-CMD_OPEN, CMD_RESET, CMD_QUIT, CMD_COPY_LOG, CMD_HIDE = 1, 2, 3, 4, 5
+CMD_OPEN, CMD_RESET, CMD_QUIT, CMD_COPY_LOG, CMD_HIDE, CMD_RESTART = 1, 2, 3, 4, 5, 6
 SM_CXSMICON = 49
 
 
@@ -32,10 +32,11 @@ def icon_marks(snap):
 
 
 class Tray(Window):
-    def __init__(self, on_open, on_reset, on_quit, on_copy_log=None, on_hide=None):
+    def __init__(self, on_open, on_reset, on_quit, on_copy_log=None, on_hide=None, on_restart=None):
         Window.__init__(self, win32.WS_EX_TOOLWINDOW, title="Claude mini tray")
         self.on_open, self.on_reset, self.on_quit, self.on_copy_log = on_open, on_reset, on_quit, on_copy_log
         self.on_hide = on_hide                  # called with True (hide the critter) or False (bring it back)
+        self.on_restart = on_restart            # start the critter again from its files (loads updates)
         self.critter_hidden = False
         self.status = "Starting…"
         self.icon = None
@@ -109,6 +110,8 @@ class Tray(Window):
         if self.on_copy_log is not None:
             win32.AppendMenuW(m, win32.MF_STRING, CMD_COPY_LOG, "Copy diagnostic log")
         win32.AppendMenuW(m, win32.MF_SEPARATOR, 0, None)
+        if self.on_restart is not None:
+            win32.AppendMenuW(m, win32.MF_STRING, CMD_RESTART, "Restart for updates")
         win32.AppendMenuW(m, win32.MF_STRING, CMD_QUIT, "Quit")
         x, y = win32.cursor_pos()
         win32.SetForegroundWindow(self.hwnd)   # required so the menu closes when clicking elsewhere
@@ -123,6 +126,8 @@ class Tray(Window):
             self.on_copy_log()
         elif cmd == CMD_HIDE:
             self.on_hide(not self.critter_hidden)
+        elif cmd == CMD_RESTART:
+            self.on_restart()
         elif cmd == CMD_QUIT:
             self.on_quit()
 

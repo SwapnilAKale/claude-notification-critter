@@ -13,6 +13,7 @@ from . import win32
 
 LINES = 3000
 RESTART_DELAY = 2.0
+RESTART_CODE = 75               # the critter asks to be started again (Restart in the tray menu: loads updates)
 GIVE_UP = (3, 120.0)            # this many unexpected stops this close together: stop restarting
 SM_SHUTTINGDOWN = 0x2000
 
@@ -66,6 +67,12 @@ def main(script, argv):
             reader.join(5.0)
             if code == 0 or win32.GetSystemMetrics(SM_SHUTTINGDOWN):
                 return 0                    # quit from the tray (or another critter is running), or Windows is closing
+            if code == RESTART_CODE:
+                # Restart from the tray: start it again right away from the files on disk (so it runs any update),
+                # handing over the log. Not an unexpected stop: no notice, and it doesn't count towards giving up.
+                cause = None
+                lines.append("%s --- Claude mini restarted from the tray menu" % time.strftime("%d-%m %H:%M:%S"))
+                continue
             cause = explain(code, last)
             lines.append("%s --- Claude mini stopped after %d s: %s (exit code 0x%08X)" % (
                 time.strftime("%d-%m %H:%M:%S"), time.time() - started, cause, code))

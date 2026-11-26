@@ -130,6 +130,7 @@ class Snapshot(object):
         self.finished = 0          # sessions showing "Unread response" (blue dot)
         self.new = 0               # other Claude news (notifications not tied to a visible session row)
         self.working = 0
+        self.background = 0        # sub-agents and background commands sessions started that still run
         self.warnings = []         # why the reading is incomplete; never fail silently
         self.needs_titles = []     # session titles waiting on me, most urgent first
         self.cards = []            # Card list: urgent first, newest first
@@ -175,6 +176,8 @@ class Snapshot(object):
                 parts.append("%d new" % self.new)
             if self.working:
                 parts.append("%d working" % self.working)
+            if self.background:
+                parts.append("%d in the background" % self.background)
             if self.paused:
                 parts.append("%d paused at the limit" % self.paused)
             head = " · ".join(parts) if parts else "All quiet"
@@ -182,7 +185,8 @@ class Snapshot(object):
         return "\n".join(lines)
 
     def key(self):
-        return (self.level, self.needs_me, self.finished, self.new, self.working, self.paused, tuple(self.warnings),
+        return (self.level, self.needs_me, self.finished, self.new, self.working, self.background, self.paused,
+                tuple(self.warnings),
                 tuple(self.needs_titles), self.claude_running, tuple(c.ident() for c in self.cards),
                 self.usage.ident() if self.usage else None, tuple((c.title, c.pct, c.cache_until and int(c.cache_until // 60), c.cache_ok, c.compacted) for c in self.contexts),
                 tuple(self.cloud), tuple(self.health), self.asleep)

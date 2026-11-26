@@ -6,6 +6,7 @@ import threading
 import time
 
 from . import diag, model, win32
+from .watchdog import RESTART_CODE
 
 TIMER_DEMO = 10
 TIMER_ALIVE = 11
@@ -86,7 +87,7 @@ def demo_state(i):
 
 
 class App(object):
-    def __init__(self, demo=False, restarted=None):
+    def __init__(self, demo=False, restarted=None, watched=False):
         from . import gdiplus
         from .blob import Blob
         from .cards import CardPanel
@@ -96,6 +97,7 @@ class App(object):
         gdiplus.startup()
         self.demo = demo
         self.quitting = False
+        self.exit_code = 0                   # what run() returns once quitting (RESTART_CODE: start again)
         self.demo_i = 0
         self.snapshot = model.starting()
         self.seen_cards = None          # notification ids already logged as new cards (None until the first reading)
@@ -117,7 +119,8 @@ class App(object):
                          on_leave=self.on_blob_leave)
         self.cards = CardPanel(on_open=self.on_card_open)
         self.tray = Tray(on_open=lambda: self.open_claude(None), on_reset=self.on_reset, on_quit=self.confirm_quit,
-                         on_copy_log=self.copy_log, on_hide=self.set_hidden)
+                         on_copy_log=self.copy_log, on_hide=self.set_hidden,
+                         on_restart=self.restart if watched else None)   # only the watchdog can start it again
         win32.SetTimer(self.ctl.hwnd, TIMER_ALIVE, ALIVE_EVERY * 1000, None)
         self.monitor = None
         if demo:
@@ -264,8 +267,16 @@ class App(object):
         else:
             self.log("quit cancelled")
 
-    def quit(self):
-        self.log("quit from the tray menu")
+    def restart(self):
+        """Restart in the tray menu: the watchdog starts the critter again at once from its files on disk, so an
+        update to them takes effect. The diagnostic log carries on (the watchdog holds it)."""
+        self.log("restart from the tray menu")
+        self.exit_code = RESTART_CODE
+        self.quit(logged=True)
+
+    def quit(self, logged=False):
+        if not logged:
+            self.log("quit from the tray menu")
         self.quitting = True
         if self.monitor is not None:
             self.monitor.stop()
@@ -276,15 +287,15 @@ class App(object):
         win32.PostQuitMessage(0)
 
     def run(self):
-        """The message loop. Only Quit in the tray menu ends it (exit code 0); returns 2 if Windows keeps failing to
-        deliver messages, so the watchdog restarts us."""
+        """The message loop. Only Quit in the tray menu ends it (exit code 0, or RESTART_CODE for Restart); returns 2 if
+        Windows keeps failing to deliver messages, so the watchdog restarts us."""
         msg = win32.MSG()
         failures = 0
         while True:
             r = win32.GetMessageW(ctypes.byref(msg), None, 0, 0)
             if r == 0:
                 if self.quitting:
-                    return 0
+                    return self.exit_code
                 self.log("ignored a quit message sent from outside")
                 continue
             if r < 0:
@@ -312,7 +323,7 @@ def main(argv=None):
     if ctypes.get_last_error() == 183:      # ERROR_ALREADY_EXISTS: another blob is running
         diag.log("another Claude mini is already running")
         return 0
-    app = App(demo="--demo" in argv, restarted=restarted)
+    app = App(demo="--demo" in argv, restarted=restarted, watched=child)
     app.log("started, pid %d%s (dpi awareness %d, blob dpi %d)" % (
         os.getpid(), ", after it stopped: " + restarted if restarted else "", awareness,
         win32.GetDpiForWindow(app.blob.hwnd)))

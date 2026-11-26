@@ -16,16 +16,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claude_mini import claude_bundle as B           # noqa: E402
 
 
-def make_asar(path, files, sizes=None):
-    """An asar archive holding `files` ({"assets/v1/x.js": bytes}), in the layout Electron writes. `sizes` overrides
-    the size recorded for some of them (a malformed archive)."""
+def make_asar(path, files, sizes=None, offsets=None):
+    """An asar archive holding `files` ({"assets/v1/x.js": bytes}), in the layout Electron writes. `sizes` and
+    `offsets` override the size or offset recorded for some of them (a malformed archive)."""
     tree, data = {"files": {}}, b""
     for name, body in files.items():
         node = tree
         *dirs, leaf = name.split("/")
         for d in dirs:
             node = node["files"].setdefault(d, {"files": {}})
-        node["files"][leaf] = {"size": (sizes or {}).get(name, len(body)), "offset": str(len(data))}
+        node["files"][leaf] = {"size": (sizes or {}).get(name, len(body)),
+                               "offset": str((offsets or {}).get(name, len(data)))}
         data += body
     j = json.dumps(tree, separators=(",", ":")).encode()
     pad = b"\0" * ((4 - len(j) % 4) % 4)
@@ -67,6 +68,14 @@ class ErrorTitles(unittest.TestCase):
         big = ["Connection lost"] + ["Trouble %d" % i for i in range(60)]
         make_asar(self.asar, {"assets/v1/bad.js": b"var x=" + table(big) + b";"}, sizes={"assets/v1/bad.js": -1})
         self.assertIsNone(B.error_titles(self.asar))
+
+    def test_an_entry_with_a_negative_offset_is_skipped(self):
+        # base + a negative offset would land inside the archive's own header. Checked on the entry list itself: reading
+        # from the wrong place cuts the table short, so error_titles would find nothing whether or not it is skipped.
+        big = ["Connection lost"] + ["Trouble %d" % i for i in range(60)]
+        make_asar(self.asar, {"assets/v1/bad.js": b"var x=" + table(big) + b";"}, offsets={"assets/v1/bad.js": -8})
+        with open(self.asar, "rb") as f:
+            self.assertEqual(list(B._files(f)), [])
 
     def test_not_an_archive(self):
         with open(self.asar, "wb") as f:

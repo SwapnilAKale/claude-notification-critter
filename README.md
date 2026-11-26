@@ -26,11 +26,12 @@ Needs the python.org Python 3.14 that's installed in `C:\Program Files\Python314
 - `--demo` cycles through made-up states (handy for looking at the visuals without real sessions).
 - `--verbose` (run with `python.exe`, not `pythonw.exe`) also prints the log (below) to the console as it goes.
 - **Quit** from the tray icon (right-click → Quit, then Yes: it asks first, since quitting wipes the in-memory
-  diagnostic log). Only one blob runs at a time. Quit is the only way it ends: a
-  close or quit message sent to its windows from outside is ignored (and logged).
+  diagnostic log). Only one blob runs at a time. Quit, and **Restart for updates** in the same menu, are the only
+  ways it ends: a close or quit message sent to its windows from outside is ignored (and logged).
 
 **Watchdog and log.** The launcher starts a small watchdog process, which runs the critter as its child (two
-`pythonw.exe` processes; `--no-watchdog` runs the critter alone). If the critter ever stops without Quit, the watchdog
+`pythonw.exe` processes; `--no-watchdog` runs the critter alone). **Restart for updates** asks the watchdog to start
+it again at once, with no notice. If the critter ever stops any other way without Quit, the watchdog
 starts it again within a few seconds, and the new critter's panel says why the last one stopped ("it crashed (access
 violation)", "another program ended it (for example Task Manager or taskkill)", ...); click that card to copy the
 log. Three unexpected stops within two minutes and it gives up with a message box instead of looping. The log is
@@ -123,9 +124,12 @@ could be read, so an empty Context list really means every cache has expired.
 - **Drag** the blob anywhere; it stays exactly where you drop it. Drag it *past* a screen edge and it half-tucks into
   that edge. Nothing ever snaps, hides or moves on its own.
 - **Tray icon** (the critter, with an amber or blue dot or a ⚠ like the blob; faded while Claude isn't running): status
-  line, Open Claude full size, Hide critter / Show critter, Reset blob position, Copy diagnostic log, Quit. **Hide
-  critter** walks it off the screen while everything else keeps running (status reading, tray icon and its marks,
-  the log); **Show critter** brings it back to where it stood (tucked into an edge again if it was).
+  line, Open Claude full size, Hide critter / Show critter, Reset blob position, Copy diagnostic log, Restart for
+  updates, Quit. **Hide critter** walks it off the screen while everything else keeps running (status reading, tray
+  icon and its marks, the log); **Show critter** brings it back to where it stood (tucked into an edge again if it
+  was). **Restart for updates** starts the critter again at once from its files, so a change to them takes effect
+  without quitting. The diagnostic log carries on, because the watchdog holds it. An update to the watchdog itself
+  (`watchdog.py`) still needs Quit and a fresh start.
 
 Cloud sessions count like any other. Their sidebar row carries a caption after the status icon, "Cloud" or "Cloud ·
 <state>" ("Cloud · Working", "Cloud · Needs input", "Cloud · Ready for review", or a pull-request state such as
@@ -328,6 +332,18 @@ Details: [RECON.md](RECON.md).
   (a request since the turn's Stop hook, an interruption or a refused request, and written within the last 15
   minutes); questions, permissions and news come from Claude's notifications. Without a summary, news remembered
   from the Code tab stays until the Code tab or a notification says otherwise.
+
+- **Background work (2026-11-27):** a session's turn can end while sub-agents or background commands it started still
+  run. Its transcript records each launch (a tool result with `backgroundTaskId`, or a sub-agent's `async_launched`)
+  and, when one ends, an enqueued `<task-notification>` with the same task id. Until then the session counts as
+  working, and its "finished" news waits (the critter celebrates once the last one is done). Needs-you is never
+  held. A sub-agent written to again after its notice was resumed and runs again. A task that writes nothing (its
+  output file, or the sub-agent's transcript) for 15 minutes stops counting, so a crashed one can't keep the critter
+  busy. A command that prints forever, such as a dev server, keeps it working while it prints. The panel's top line
+  says how many run ("1 working · 2 in the background"), and the diagnostic log notes each change ("in the
+  background: ..."). On the chat tab, Claude's "Code, unread activity" summary is also held while any session has
+  background work, since it can't say which session it means. A transcript first seen is looked through for its
+  last 4 MB only, so a task launched before that and still running isn't seen.
 
 - **Chat tab:** Claude's chat sidebar lists your chats and, under each project, a few of its sessions. Code sessions
   the blob already knows from the Code tab are read live there. Every other Code session keeps its last Code-tab

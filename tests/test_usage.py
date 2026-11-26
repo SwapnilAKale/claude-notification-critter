@@ -210,6 +210,148 @@ class Watching(unittest.TestCase):
         t.poll(now + 2 * U.SCAN_EVERY + 2)
         self.assertEqual(t.working(now), set())                     # you stopped it
 
+    # ----- background work: sub-agents and background commands a session started -----
+    @staticmethod
+    def launched_command(at, tid, output):
+        """The tool result Claude Code records for a command moved to the background (seen 2026-11-26)."""
+        return json.dumps({"type": "user", "isSidechain": False, "timestamp": iso(at),
+                           "toolUseResult": {"stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": tid},
+                           "message": {"role": "user", "content": [{"tool_use_id": "toolu_1", "type": "tool_result",
+                                       "content": "Command running in background with ID: %s. Output is being written "
+                                                  "to: %s. You will be notified when it completes." % (tid, output)}]}},
+                          separators=(",", ":"))
+
+    @staticmethod
+    def launched_agent(at, aid):
+        return json.dumps({"type": "user", "isSidechain": False, "timestamp": iso(at),
+                           "toolUseResult": {"isAsync": True, "status": "async_launched", "agentId": aid,
+                                             "description": "Check the fix"},
+                           "message": {"role": "user", "content": [{"tool_use_id": "toolu_2", "type": "tool_result",
+                                                                    "content": "Async agent launched successfully."}]}},
+                          separators=(",", ":"))
+
+    @staticmethod
+    def notice(at, tid, status="completed"):
+        return json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": iso(at), "sessionId": "s",
+                           "content": "<task-notification>\n<task-id>%s</task-id>\n<status>%s</status>\n"
+                                      "</task-notification>" % (tid, status)}, separators=(",", ":"))
+
+    def test_background_work_runs_until_its_completion_notice(self):
+        now = time.time()
+        out = os.path.join(self.root, "b1.output")
+        self.write("b1.output", "building...")
+        os.makedirs(os.path.join(self.root, "proj-a", "one", "subagents"))
+        self.write("proj-a/one/subagents/agent-a1.jsonl", '{"type":"user"}')
+        self.write("proj-a/one.jsonl", '{"type":"custom-title","customTitle":"Claude mini"}',
+                   self.launched_command(now - 30, "b1", out), self.launched_agent(now - 20, "a1"))
+        t = U.TranscriptUsage(self.root)
+        t.poll(now)
+        self.assertEqual(t.background(now), {"Claude mini": 2})
+        time.sleep(0.05)
+        self.write("proj-a/one.jsonl", self.notice(time.time(), "b1", "failed"))
+        t.poll(now + U.SCAN_EVERY + 1)
+        self.assertEqual(t.background(now), {"Claude mini": 1})             # the command ended (failed counts too)
+        time.sleep(0.05)
+        self.write("proj-a/one.jsonl", self.notice(time.time(), "a1"))
+        t.poll(now + 2 * U.SCAN_EVERY + 2)
+        self.assertEqual(t.background(now), {})                             # the sub-agent too
+
+    def test_a_resumed_sub_agent_runs_again(self):
+        now = time.time()
+        os.makedirs(os.path.join(self.root, "proj-a", "one", "subagents"))
+        agent = os.path.join(self.root, "proj-a", "one", "subagents", "agent-a1.jsonl")
+        self.write("proj-a/one/subagents/agent-a1.jsonl", '{"type":"user"}')
+        self.write("proj-a/one.jsonl", '{"type":"custom-title","customTitle":"Claude mini"}',
+                   self.launched_agent(now - 600, "a1"), self.notice(now - 300, "a1"))
+        os.utime(agent, (now - 301, now - 301))                             # its last write, just before its notice
+        t = U.TranscriptUsage(self.root)
+        t.poll(now)
+        self.assertEqual(t.background(now), {})
+        os.utime(agent, (now - 5, now - 5))                                 # a follow-up message woke it up
+        self.assertEqual(t.background(now), {"Claude mini": 1})
+
+    def test_background_work_that_went_quiet_isnt_counted(self):
+        # A task that crashed, or one waiting on nothing we can see, writes nothing more: after TURN_QUIET_S it drops.
+        now = time.time()
+        out = os.path.join(self.root, "b1.output")
+        self.write("b1.output", "x")
+        os.utime(out, (now - U.TURN_QUIET_S - 60, now - U.TURN_QUIET_S - 60))
+        self.write("proj-a/one.jsonl", '{"type":"custom-title","customTitle":"Claude mini"}',
+                   self.launched_command(now - U.TURN_QUIET_S - 120, "b1", out))
+        t = U.TranscriptUsage(self.root)
+        t.poll(now)
+        self.assertEqual(t.background(now), {})
+        self.assertEqual(sum(len(v) for v in t.bg.values()), 1)           # not counted, but not forgotten yet
+        os.utime(out, (now - 10, now - 10))                                 # a dev server still printing
+        self.assertEqual(t.background(now), {"Claude mini": 1})
+        self.assertEqual(t.background(now + U.ACTIVE_S - 60), {})          # quiet for hours: not counted ...
+        self.assertEqual(sum(len(v) for v in t.bg.values()), 1)           # ... but still remembered
+        # Silent for longer than ACTIVE_S and never a notice (its session was killed): forgotten, not kept forever,
+        # its transcript's entry too.
+        self.assertEqual(t.background(now + U.ACTIVE_S + 60), {})
+        self.assertEqual(t.bg, {})
+
+    def test_an_archived_sessions_background_work_isnt_counted_but_is_forgotten(self):
+        now = time.time()
+        out = os.path.join(self.root, "b1.output")
+        self.write("b1.output", "x")
+        self.write("proj-a/29ba9c3c.jsonl", '{"type":"custom-title","customTitle":"Old one"}',
+                   self.launched_command(now - 30, "b1", out))
+        folder = os.path.join(self.records, "claude_x", "claude-code-sessions", "a")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "local_29ba.json"), "w", encoding="utf-8") as fh:
+            json.dump({"cliSessionId": "29ba9c3c", "isArchived": True}, fh)
+        t = U.TranscriptUsage(self.root, self.records)
+        t.poll(now)
+        self.assertEqual(t.background(now), {})                             # archived: not counted
+        self.assertEqual(sum(len(v) for v in t.bg.values()), 1)
+        self.assertEqual(t.background(now + U.ACTIVE_S + 60), {})
+        self.assertEqual(t.bg, {})                                          # but not kept forever either
+
+    def test_quoted_launches_and_notices_dont_count(self):
+        # A message that only quotes these records (e.g. a session discussing them) isn't one.
+        now = time.time()
+        quote = json.dumps({"type": "assistant", "isSidechain": False, "timestamp": iso(now - 10),
+                            "message": {"role": "assistant", "content": [{"type": "text", "text":
+                                        '"backgroundTaskId": "b9" ... "async_launched" ... <task-notification>'
+                                        '<task-id>b1</task-id></task-notification> "queue-operation"'}]}})
+        out = os.path.join(self.root, "b1.output")
+        self.write("b1.output", "x")
+        self.write("proj-a/one.jsonl", '{"type":"custom-title","customTitle":"Claude mini"}',
+                   self.launched_command(now - 30, "b1", out), quote)
+        t = U.TranscriptUsage(self.root)
+        t.poll(now)
+        self.assertEqual(t.background(now), {"Claude mini": 1})            # b1 still running, b9 never launched
+
+    def test_a_launch_far_back_in_a_long_transcript(self):
+        # Only the end of a transcript is read at first, and from then on only what was added.
+        now = time.time()
+        out = os.path.join(self.root, "b1.output")
+        self.write("b1.output", "x")
+        filler = ['{"type":"progress","data":"%s"}' % ("x" * 1000) for _ in range(300)]
+        self.write("proj-a/one.jsonl", '{"type":"custom-title","customTitle":"Claude mini"}',
+                   self.launched_command(now - 60, "b1", out), *filler)
+        saved = U.BG_FIRST_BYTES
+        U.BG_FIRST_BYTES = 100 * 1024                                       # less than what follows the launch
+        try:
+            t = U.TranscriptUsage(self.root)
+            t.poll(now)
+            self.assertEqual(t.background(now), {})                         # too far back on a first look
+            U.BG_FIRST_BYTES = 1024 * 1024
+            t2 = U.TranscriptUsage(self.root)
+            t2.poll(now)
+            self.assertEqual(t2.background(now), {"Claude mini": 1})
+            time.sleep(0.05)
+            self.write("proj-a/one.jsonl", *filler)                         # more since: only that part is read
+            t2.poll(now + U.SCAN_EVERY + 1)
+            self.assertEqual(t2.background(now), {"Claude mini": 1})
+            time.sleep(0.05)
+            self.write("proj-a/one.jsonl", self.notice(time.time(), "b1"))
+            t2.poll(now + 2 * U.SCAN_EVERY + 2)
+            self.assertEqual(t2.background(now), {})
+        finally:
+            U.BG_FIRST_BYTES = saved
+
     def test_when_replies_ended(self):
         now = time.time()
         stop = lambda at: json.dumps({"type": "system", "subtype": "stop_hook_summary", "isSidechain": False,  # noqa: E731

@@ -780,12 +780,21 @@ class Monitor(threading.Thread):
             activity = self.transcripts.activity()
             limit_stops = self.transcripts.limit_stops()
             working = self.transcripts.working(now)
+            # Sub-agents and background commands a session started keep it working after its turn ends (reported
+            # 2026-11-27: the critter celebrated while a session's checkers were still running).
+            busy = self.transcripts.background(now)
+            working = working | set(busy)
             local = self.transcripts.local_titles()
             transcripts_read = self.transcripts.ok
         except Exception:
             traceback.print_exc()
-            hooked, activity, limit_stops, working, local = None, [], {}, set(), set()
+            hooked, activity, limit_stops, working, local, busy = None, [], {}, set(), set(), {}
             transcripts_read = False
+        snap.background = sum(busy.values())
+        if busy != getattr(self, "_last_busy", {}):
+            self._last_busy = dict(busy)
+            self.log("in the background: " + (", ".join("%s=%d" % (t[:28], n) for t, n in sorted(busy.items()))
+                                               or "-"))
         if hooked is not None and (self.usage is None or hooked.seen_at > self.usage.seen_at):
             self.usage = hooked
             self.hook_at = hooked.seen_at
@@ -1037,6 +1046,8 @@ class Monitor(threading.Thread):
                 cls = NEEDS
             elif tk == NEW and cls not in (NEEDS, NEW):
                 cls = NEW
+            if cls == NEW and r.title in busy:
+                cls = WORKING                # its turn ended but what it started still runs: finished once that's done
             its = by_row.get(id(r), [])
             if cls == NEEDS:
                 snap.needs_me += 1
@@ -1070,6 +1081,8 @@ class Monitor(threading.Thread):
             if agg == NEEDS and snap.needs_me == 0:
                 snap.needs_me = 1
                 cards.append(model.Card("Claude Code", model.WAITING, "A session is awaiting your input"))
+            elif agg == NEW and snap.finished == 0 and busy:
+                snap.working = max(snap.working, 1)          # may be a session whose background work still runs
             elif agg == NEW and snap.finished == 0:
                 snap.finished = 1
                 cards.append(model.Card("Claude Code", model.FINISHED, "A session has unread activity"))

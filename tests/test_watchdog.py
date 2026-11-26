@@ -4,6 +4,7 @@ Run:  py -3.14 -B -m unittest discover -s tests
 """
 import os
 import sys
+import threading
 import unittest
 
 sys.dont_write_bytecode = True
@@ -22,6 +23,64 @@ class WhyItStopped(unittest.TestCase):
         self.assertEqual(WD.explain(1, ["! Traceback (most recent call last):", "! ValueError: x"]),
                          "it hit a Python error")
         self.assertIn("another program ended it", WD.explain(1, ["read rows: -"]))
+
+
+class Restarting(unittest.TestCase):
+    """The watchdog's loop, with a fake critter process: no window, process or mutex is really made."""
+
+    def run_watchdog(self, codes):
+        runs, sleeps, boxes = [], [], []
+
+        class Pipe(object):
+            def __init__(self, run):
+                self.run = run
+
+            def write(self, data):
+                self.run["handed"] = data.decode("utf-8")
+                self.run["got"].set()
+
+            def close(self):
+                pass
+
+        class Proc(object):
+            def __init__(self, args, **kw):
+                run = {"args": args, "got": threading.Event()}
+                runs.append(run)
+                self.stdin, self.stdout = Pipe(run), iter([b"line from run %d\n" % len(runs)])
+                self.code = codes[len(runs) - 1]
+
+            def wait(self):
+                return self.code
+
+        class Win32(object):
+            CreateMutexW = staticmethod(lambda *a: 1)
+            CloseHandle = staticmethod(lambda h: None)
+            GetSystemMetrics = staticmethod(lambda i: 0)
+            MessageBoxW = staticmethod(lambda *a: boxes.append(a[1]))
+
+        saved = (WD.subprocess.Popen, WD.win32, WD.time.sleep, WD.ctypes.get_last_error)
+        WD.subprocess.Popen, WD.win32, WD.time.sleep = Proc, Win32, sleeps.append
+        WD.ctypes.get_last_error = lambda: 0
+        try:
+            result = WD.main("ClaudeMini.pyw", [])
+        finally:
+            WD.subprocess.Popen, WD.win32, WD.time.sleep, WD.ctypes.get_last_error = saved
+        for run in runs:
+            self.assertTrue(run["got"].wait(5.0))      # the log is handed over on a thread of its own
+        return result, runs, sleeps, boxes
+
+    def test_restart_from_the_tray_starts_it_again_at_once_with_the_log(self):
+        result, runs, sleeps, boxes = self.run_watchdog([WD.RESTART_CODE, WD.RESTART_CODE, WD.RESTART_CODE,
+                                                         WD.RESTART_CODE, 0])
+        self.assertEqual((result, len(runs), sleeps, boxes), (0, 5, [], []))   # no delay, never "keeps stopping"
+        self.assertFalse(any("--restarted" in r["args"] for r in runs))       # no "it stopped" notice
+        self.assertIn("line from run 1", runs[1]["handed"])                    # the log carries on
+        self.assertIn("restarted from the tray menu", runs[1]["handed"])
+
+    def test_an_unexpected_stop_is_still_explained(self):
+        result, runs, sleeps, boxes = self.run_watchdog([0xC0000005, 0])
+        self.assertEqual((result, len(runs), sleeps), (0, 2, [WD.RESTART_DELAY]))
+        self.assertEqual(runs[1]["args"][-2:], ["--restarted", "it crashed (access violation)"])
 
 
 class Log(unittest.TestCase):
